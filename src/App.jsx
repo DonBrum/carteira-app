@@ -308,37 +308,15 @@ export default function App(){
     toast$("Sessão encerrada","#f97316");
   };
 
-  // ── Loading screen ──
-  if(user===undefined) return(
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",color:"#94a3b8",gap:12}}>
-      <p style={{fontSize:32}}>💰</p>
-      <p style={{fontSize:13}}>Carregando…</p>
-    </div>
-  );
-
-  // ── Not logged in ──
-  if(!user) return <LoginScreen onLogin={()=>{}}/>;
-
-  // ── PIN screen ──
-  if(locked&&dataLoaded) return <PinScreen savedPin={savedPin} onUnlock={handleUnlock}/>;
-
-  // ── Loading data ──
-  if(!dataLoaded) return(
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",color:"#94a3b8",gap:12}}>
-      <p style={{fontSize:32}}>☁️</p>
-      <p style={{fontSize:13}}>Sincronizando dados…</p>
-    </div>
-  );
-
+  // ── All hooks BEFORE any early returns (React rules) ──
   const cats=useMemo(()=>({
     receita:[...DC.receita,...(ccat.receita||[]).map(c=>({...c,id:c.id,l:c.label,i:c.icon}))],
     despesa:[...DC.despesa,...(ccat.despesa||[]).map(c=>({...c,id:c.id,l:c.label,i:c.icon}))]
   }),[ccat]);
   const getCat=useCallback(id=>{for(const list of Object.values(cats)){const f=list.find(c=>c.id===id);if(f)return f;}return{l:id,i:"•"};},[cats]);
 
-  // ── Auto-materialise recurring ──
   useEffect(()=>{
-    if(!rec.length)return;
+    if(!rec.length||!dataLoaded)return;
     const done=new Set(tx.filter(t=>t.rk).map(t=>t.rk));
     const add=[];
     for(const tpl of rec){
@@ -347,11 +325,10 @@ export default function App(){
         add.push({id:`r_${tpl.id}_${o.orig}`,rk:o.key,rid:tpl.id,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:o.date,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid,auto:true});
     }
     if(add.length)setTx(p=>{const ex=new Set(p.map(t=>t.id));return[...p,...add.filter(t=>!ex.has(t.id))];});
-  },[rec]);
+  },[rec,dataLoaded]);
 
-  // ── Auto-materialise installments ──
   useEffect(()=>{
-    if(!inst.length)return;
+    if(!inst.length||!dataLoaded)return;
     const now=new Date();const add=[];
     for(const ins of inst){
       for(let i=0;i<ins.icount;i++){
@@ -364,7 +341,7 @@ export default function App(){
       }
     }
     if(add.length)setTx(p=>{const ex=new Set(p.map(t=>t.id));return[...p,...add.filter(t=>!ex.has(t.id))];});
-  },[inst]);
+  },[inst,dataLoaded]);
 
   const {m,y}=filt;
   const NOW=new Date();
@@ -380,31 +357,48 @@ export default function App(){
         if(!tx.find(t=>t.id===iid))items.push({_fid:`fi_${ins.id}_${o.idx}`,type:ins.type,amt:o.amt,desc:ins.desc,cat:ins.cat,date:o.date,atype:ins.atype,aid:ins.aid,isIF:true,iidx:o.idx,icount:ins.icount,tamt:ins.tamt});}}
     return items.sort((a,b)=>pd(a.date)-pd(b.date));
   },[rec,inst,tx,m,y]);
-
   const allM=useMemo(()=>[...confM.map(t=>({...t,real:true})),...fcasts].sort((a,b)=>pd(b.date)-pd(a.date)),[confM,fcasts]);
-  const totR=confM.filter(t=>t.type==="receita"&&!t.isTE).reduce((s,t)=>s+t.amt,0);
-  const totD=confM.filter(t=>t.type==="despesa"&&!t.isTO).reduce((s,t)=>s+t.amt,0);
+  const totR=useMemo(()=>confM.filter(t=>t.type==="receita"&&!t.isTE).reduce((s,t)=>s+t.amt,0),[confM]);
+  const totD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO).reduce((s,t)=>s+t.amt,0),[confM]);
   const saldo=totR-totD;
-  const fcR=fcasts.filter(f=>f.type==="receita").reduce((s,f)=>s+f.amt,0);
-  const fcD=fcasts.filter(f=>f.type==="despesa").reduce((s,f)=>s+f.amt,0);
+  const fcR=useMemo(()=>fcasts.filter(f=>f.type==="receita").reduce((s,f)=>s+f.amt,0),[fcasts]);
+  const fcD=useMemo(()=>fcasts.filter(f=>f.type==="despesa").reduce((s,f)=>s+f.amt,0),[fcasts]);
   const saldoP=(totR+fcR)-(totD+fcD);
   const catD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO).reduce((a,t)=>{a[t.cat]=(a[t.cat]||0)+t.amt;return a;},{}),[confM]);
   const catDF=useMemo(()=>[...confM.filter(t=>t.type==="despesa"&&!t.isTO),...fcasts.filter(f=>f.type==="despesa")].reduce((a,t)=>{a[t.cat]=(a[t.cat]||0)+t.amt;return a;},{}),[confM,fcasts]);
-  const bbal=b=>{const s=tx.filter(t=>t.atype==="bank"&&t.aid===b.id).reduce((s,t)=>s+(t.type==="receita"?t.amt:-t.amt),0);return(parseFloat(b.bal)||0)+s;};
-  const tbb=bnks.reduce((s,b)=>s+bbal(b),0);
-  const csp=cid=>confM.filter(t=>t.atype==="card"&&t.aid===cid&&t.type==="despesa").reduce((s,t)=>s+t.amt,0);
-  const alab=t=>{
+  const bbal=useCallback(b=>{const s=tx.filter(t=>t.atype==="bank"&&t.aid===b.id).reduce((s,t)=>s+(t.type==="receita"?t.amt:-t.amt),0);return(parseFloat(b.bal)||0)+s;},[tx]);
+  const tbb=useMemo(()=>bnks.reduce((s,b)=>s+bbal(b),0),[bnks,bbal]);
+  const csp=useCallback(cid=>confM.filter(t=>t.atype==="card"&&t.aid===cid&&t.type==="despesa").reduce((s,t)=>s+t.amt,0),[confM]);
+  const alab=useCallback(t=>{
     if(t.atype==="bank"){const b=bnks.find(b=>b.id===t.aid);return b?`${b.icon} ${b.name}`:""; }
     if(t.atype==="card"){const c=crds.find(c=>c.id===t.aid);return c?`${c.icon} ${c.name}`:""; }
     return "";
-  };
-  const pM=()=>setFilt(f=>f.m===0?{m:11,y:f.y-1}:{m:f.m-1,y:f.y});
-  const nM=()=>setFilt(f=>f.m===11?{m:0,y:f.y+1}:{m:f.m+1,y:f.y});
+  },[bnks,crds]);
   const realPie=useMemo(()=>{const e=Object.entries(catD).filter(([,v])=>v>0);const sl=e.map(([id,v],i)=>({l:getCat(id).l,i:getCat(id).i,v,c:PCOLS[i%PCOLS.length]}));const used=e.reduce((s,[,v])=>s+v,0);if(totR>used)sl.push({l:"Saldo livre",v:totR-used,c:"#1e3a5f"});return sl;},[catD,totR,getCat]);
   const prevPie=useMemo(()=>{const e=Object.entries(catDF).filter(([,v])=>v>0);const sl=e.map(([id,v],i)=>({l:getCat(id).l,v,c:PCOLS[i%PCOLS.length]}));const used=e.reduce((s,[,v])=>s+v,0),tot=totR+fcR;if(tot>used)sl.push({l:"Saldo livre",v:tot-used,c:"#1e3a5f"});return sl;},[catDF,totR,fcR,getCat]);
-  const riskP=(totR+fcR)>0?(totD+fcD)/(totR+fcR):0;
+  const riskP=useMemo(()=>(totR+fcR)>0?(totD+fcD)/(totR+fcR):0,[totR,totD,fcR,fcD]);
   const daysM=new Date(y,m+1,0).getDate();
   const dayN=m===NOW.getMonth()&&y===NOW.getFullYear()?NOW.getDate():daysM;
+
+  // ── Early returns AFTER all hooks ──
+  if(user===undefined) return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",color:"#94a3b8",gap:12}}>
+      <p style={{fontSize:32}}>💰</p>
+      <p style={{fontSize:13}}>Carregando…</p>
+    </div>
+  );
+  if(!user) return <LoginScreen onLogin={()=>{}}/>;
+  if(locked&&dataLoaded) return <PinScreen savedPin={savedPin} onUnlock={handleUnlock}/>;
+  if(!dataLoaded) return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",color:"#94a3b8",gap:12}}>
+      <p style={{fontSize:32}}>☁️</p>
+      <p style={{fontSize:13}}>Sincronizando dados…</p>
+    </div>
+  );
+
+
+  const pM=()=>setFilt(f=>f.m===0?{m:11,y:f.y-1}:{m:f.m-1,y:f.y});
+  const nM=()=>setFilt(f=>f.m===11?{m:0,y:f.y+1}:{m:f.m+1,y:f.y});
 
   const submit=()=>{
     if(form.isTransfer){
