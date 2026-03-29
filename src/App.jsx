@@ -1,4 +1,7 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { auth, db, provider } from "./firebase";
+import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DC = {
@@ -22,12 +25,24 @@ const pd=s=>new Date(s+"T12:00:00");
 const isBiz=d=>{const w=d.getDay();if(w===0||w===6)return false;return!HOL.has(`${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`);};
 const adjBiz=(s,r)=>{if(r==="ignore")return s;let d=pd(s);if(isBiz(d))return s;const st=r==="next"?1:-1;let g=0;while(!isBiz(d)&&g++<15)d.setDate(d.getDate()+st);return d.toISOString().split("T")[0];};
 const addF=(s,f)=>{const d=pd(s);if(f==="weekly")d.setDate(d.getDate()+7);else if(f==="biweekly")d.setDate(d.getDate()+14);else if(f==="monthly")d.setMonth(d.getMonth()+1);else if(f==="bimonthly")d.setMonth(d.getMonth()+2);else if(f==="quarterly")d.setMonth(d.getMonth()+3);else if(f==="semiannual")d.setMonth(d.getMonth()+6);else if(f==="annual")d.setFullYear(d.getFullYear()+1);else return null;return d.toISOString().split("T")[0];};
-const LS={g:(k,d)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch{return d;}},s:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}}};
 const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:""});
 const EB={name:"",bal:"",color:BCOLS[0],icon:"🏦"};
 const EC={name:"",lim:"",color:CCOLS[0],icon:"💳",due:"10"};
 
-// ── Pie Chart ─────────────────────────────────────────────────────────────────
+// ── Firestore helpers ─────────────────────────────────────────────────────────
+const KEYS=["tx","rec","inst","banks","cards","budg","ccat","pin"];
+const userDoc=(uid)=>doc(db,"users",uid);
+
+async function loadUserData(uid){
+  const snap=await getDoc(userDoc(uid));
+  if(snap.exists()) return snap.data();
+  return {};
+}
+async function saveUserData(uid,data){
+  await setDoc(userDoc(uid),data,{merge:true});
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
 function Pie({slices,sz=150,label,sub}){
   if(!slices?.length)return<div style={{width:sz,height:sz,borderRadius:"50%",background:"#1e293b",display:"flex",alignItems:"center",justifyContent:"center"}}><p style={{fontSize:11,color:"#475569"}}>Sem dados</p></div>;
   const tot=slices.reduce((s,x)=>s+x.v,0);if(!tot)return null;
@@ -40,8 +55,6 @@ function Pie({slices,sz=150,label,sub}){
     </div>
   </div>;
 }
-
-// ── Gauge ─────────────────────────────────────────────────────────────────────
 function Gauge({pct=0,label,sub,sz=130}){
   const cp=Math.min(pct,1),a=cp*Math.PI,r=0.75;
   const ex=Math.cos(Math.PI-a)*r,ey=-Math.sin(Math.PI-a)*r;
@@ -58,7 +71,108 @@ function Gauge({pct=0,label,sub,sz=130}){
   </div>;
 }
 
-// ── CSS ───────────────────────────────────────────────────────────────────────
+// ── PIN Screen ────────────────────────────────────────────────────────────────
+function PinScreen({savedPin,onUnlock}){
+  const [input,setInput]=useState("");
+  const [error,setError]=useState(false);
+  const isSetup=!savedPin;
+  const [confirm,setConfirm]=useState("");
+  const [step,setStep]=useState(1);
+  const press=val=>{if(val==="del"){setInput(p=>p.slice(0,-1));setError(false);return;}if(input.length>=6)return;setInput(p=>p+val);};
+  useEffect(()=>{
+    if(!isSetup&&input.length===4){
+      if(input===savedPin)onUnlock();
+      else{setError(true);setTimeout(()=>{setInput("");setError(false);},600);}
+    }
+  },[input]);
+  const handleConfirm=()=>{
+    if(step===1){if(input.length<4)return;setConfirm(input);setInput("");setStep(2);}
+    else{if(input===confirm)onUnlock(input);else{setError(true);setTimeout(()=>{setInput("");setError(false);setStep(1);setConfirm("");},600);}}
+  };
+  const title=isSetup?(step===1?"🔐 Criar PIN":"🔐 Confirme o PIN"):"🔒 Digite seu PIN";
+  const subtitle=isSetup?(step===1?"Defina um PIN de 4 a 6 dígitos":"Digite o PIN novamente"):"Seu app está protegido";
+  return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",gap:20,padding:24}}>
+      <div style={{background:"#1e293b",borderRadius:20,padding:"32px 28px",width:"100%",maxWidth:320,display:"flex",flexDirection:"column",alignItems:"center",gap:16}}>
+        <h2 style={{fontSize:18,fontWeight:700,color:"#e2e8f0"}}>{title}</h2>
+        <p style={{fontSize:12,color:"#64748b",textAlign:"center"}}>{subtitle}</p>
+        <div style={{display:"flex",gap:12,margin:"8px 0"}}>
+          {Array.from({length:Math.max(input.length,4)}).map((_,i)=>(
+            <div key={i} style={{width:14,height:14,borderRadius:"50%",background:error?"#ef4444":i<input.length?"#38bdf8":"#334155",transition:"background .2s"}}/>
+          ))}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,width:"100%"}}>
+          {["1","2","3","4","5","6","7","8","9","del","0"].map(k=>(
+            <button key={k} onClick={()=>press(k)} style={{background:"#0f172a",border:"1.5px solid #334155",borderRadius:12,padding:16,fontSize:k==="del"?16:20,fontWeight:700,color:k==="del"?"#94a3b8":"#e2e8f0",cursor:"pointer"}}>
+              {k==="del"?"⌫":k}
+            </button>
+          ))}
+          {isSetup
+            ?<button disabled={input.length<4} onClick={handleConfirm} style={{background:input.length<4?"#334155":"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:12,padding:16,fontSize:13,fontWeight:700,color:"#fff",cursor:input.length<4?"not-allowed":"pointer"}}>
+              {step===1?"Próximo":"Salvar"}
+            </button>
+            :<div/>
+          }
+        </div>
+        {error&&<p style={{fontSize:12,color:"#f87171",fontWeight:600}}>{isSetup?"PINs não coincidem":"PIN incorreto"}</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Login Screen ──────────────────────────────────────────────────────────────
+function LoginScreen({onLogin}){
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState("");
+  const handleGoogle=async()=>{
+    setLoading(true);setError("");
+    try{ await signInWithPopup(auth,provider); }
+    catch(e){ setError("Erro ao fazer login. Tente novamente."); setLoading(false); }
+  };
+  return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",padding:24}}>
+      <div style={{background:"#1e293b",borderRadius:20,padding:"40px 32px",width:"100%",maxWidth:340,display:"flex",flexDirection:"column",alignItems:"center",gap:20,textAlign:"center"}}>
+        <p style={{fontSize:48}}>💰</p>
+        <h1 style={{fontSize:22,fontWeight:700,color:"#e2e8f0"}}>Minha Carteira</h1>
+        <p style={{fontSize:13,color:"#64748b",lineHeight:1.5}}>Seus dados sincronizados em todos os dispositivos. Acesse de qualquer lugar.</p>
+        <button onClick={handleGoogle} disabled={loading}
+          style={{display:"flex",alignItems:"center",gap:12,background:"#fff",border:"none",borderRadius:12,padding:"13px 24px",fontSize:14,fontWeight:600,color:"#1e293b",cursor:loading?"not-allowed":"pointer",width:"100%",justifyContent:"center",opacity:loading?0.7:1}}>
+          <svg width="20" height="20" viewBox="0 0 48 48">
+            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+          </svg>
+          {loading?"Entrando…":"Entrar com Google"}
+        </button>
+        {error&&<p style={{fontSize:12,color:"#f87171"}}>{error}</p>}
+        <p style={{fontSize:11,color:"#475569"}}>Cada conta Google tem seus próprios dados separados.</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Recurring helpers ─────────────────────────────────────────────────────────
+function autoOccs(tpl,done){
+  const now=new Date();const res=[];let cur=tpl.startDate;let g=0;
+  while(g++<1200){const adj=adjBiz(cur,tpl.bday||"ignore");const d=pd(adj);if(d>now)break;
+    const key=`${tpl.id}__${cur}`;if(!done.has(key))res.push({key,date:adj,orig:cur});
+    const nx=addF(cur,tpl.freq);if(!nx||nx===cur)break;cur=nx;}
+  return res;
+}
+function recInMonth(tpl,m,y){
+  const ms=new Date(y,m,1),me=new Date(y,m+1,0);const res=[];let cur=tpl.startDate;let g=0;
+  while(g++<1200){const adj=adjBiz(cur,tpl.bday||"ignore");const d=pd(adj);if(d>me)break;
+    if(d>=ms)res.push({date:adj,orig:cur});const nx=addF(cur,tpl.freq);if(!nx||nx===cur)break;cur=nx;}
+  return res;
+}
+function instInMonth(inst,m,y){
+  const res=[];
+  for(let i=0;i<inst.icount;i++){const d=pd(inst.startDate);d.setMonth(d.getMonth()+i);const raw=d.toISOString().split("T")[0];const adj=adjBiz(raw,inst.bday||"ignore");const dd=pd(adj);
+    if(dd.getMonth()===m&&dd.getFullYear()===y)res.push({date:adj,orig:raw,idx:i+1,amt:inst.tamt/inst.icount});}
+  return res;
+}
+
 const CSS=`
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}html,body{background:#0f172a}
@@ -91,93 +205,130 @@ input,select,textarea{font-family:inherit;outline:none;color:#e2e8f0}button{curs
 select option{background:#1e293b;color:#e2e8f0}
 `;
 
-// ── Recurring helpers ─────────────────────────────────────────────────────────
-function autoOccs(tpl,done){
-  const now=new Date();const res=[];let cur=tpl.startDate;let g=0;
-  while(g++<1200){const adj=adjBiz(cur,tpl.bday||"ignore");const d=pd(adj);if(d>now)break;
-    const key=`${tpl.id}__${cur}`;if(!done.has(key))res.push({key,date:adj,orig:cur});
-    const nx=addF(cur,tpl.freq);if(!nx||nx===cur)break;cur=nx;}
-  return res;
-}
-function recInMonth(tpl,m,y){
-  const ms=new Date(y,m,1),me=new Date(y,m+1,0);const res=[];let cur=tpl.startDate;let g=0;
-  while(g++<1200){const adj=adjBiz(cur,tpl.bday||"ignore");const d=pd(adj);if(d>me)break;
-    if(d>=ms)res.push({date:adj,orig:cur});const nx=addF(cur,tpl.freq);if(!nx||nx===cur)break;cur=nx;}
-  return res;
-}
-function instInMonth(inst,m,y){
-  const res=[];
-  for(let i=0;i<inst.icount;i++){const d=pd(inst.startDate);d.setMonth(d.getMonth()+i);const raw=d.toISOString().split("T")[0];const adj=adjBiz(raw,inst.bday||"ignore");const dd=pd(adj);
-    if(dd.getMonth()===m&&dd.getFullYear()===y)res.push({date:adj,orig:raw,idx:i+1,amt:inst.tamt/inst.icount});}
-  return res;
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
-export default function App() {
-  const handleUnlock = () => {
-  if (!savedPin) {
-    if (!pinInput || pinInput.length < 4) {
-      alert("PIN deve ter pelo menos 4 dígitos");
-      return;
-    }
+export default function App(){
+  // ── Auth state ──
+  const [user,    setUser]    = useState(undefined); // undefined=loading, null=logged out
+  const [locked,  setLocked]  = useState(true);
+  const [savedPin,setSavedPin]= useState("");
+  const [dataLoaded,setDataLoaded]=useState(false);
 
-    localStorage.setItem("app_pin", pinInput);
-    setSavedPin(pinInput);
-    setLocked(false);
-  } else if (pinInput === savedPin) {
-    setLocked(false);
-  } else {
-    alert("PIN incorreto");
-    setPinInput("");
-  }
-};
-  // 🔐 ADICIONE AQUI
-  const [locked, setLocked] = useState(true);
-  const [pinInput, setPinInput] = useState("");
-  const [savedPin, setSavedPin] = useState(() => localStorage.getItem("app_pin") || "");
+  // ── App data ──
+  const [tx,   setTx]  = useState([]);
+  const [rec,  setRec] = useState([]);
+  const [inst, setInst]= useState([]);
+  const [bnks, setBnks]= useState([]);
+  const [crds, setCrds]= useState([]);
+  const [budg, setBudg]= useState({});
+  const [ccat, setCcat]= useState({receita:[],despesa:[]});
 
-  const [tx,   setTx]  =useState(()=>LS.g("wt",[]));
-  const [rec,  setRec] =useState(()=>LS.g("wr",[]));
-  const [inst, setInst]=useState(()=>LS.g("wi",[]));
-  const [bnks, setBnks]=useState(()=>LS.g("wb",[]));
-  const [crds, setCrds]=useState(()=>LS.g("wc",[]));
-  const [budg, setBudg]=useState(()=>LS.g("wbd",{}));
-  const [ccat, setCcat]=useState(()=>LS.g("wcc",{receita:[],despesa:[]}));
-  const [view, setView]=useState("home");
-  const [filt, setFilt]=useState({m:new Date().getMonth(),y:new Date().getFullYear()});
-  const [form, setForm]=useState(mf);
-  const [eid,  setEid] =useState(null);
-  const [bf,   setBf]  =useState(EB);
-  const [cf,   setCf]  =useState(EC);
-  const [catF, setCatF]=useState({label:"",icon:"🎯",type:"despesa"});
-  const [ebid, setEbid]=useState(null);
-  const [ecid, setEcid]=useState(null);
-  const [atab, setAtab]=useState("banks");
-  const [bi,   setBi]  =useState({});
-  const [selC, setSelC]=useState(null);
-  const [mdl,  setMdl] =useState(null);
-  const [tst,  setTst] =useState(null);
-  const [rtab, setRtab]=useState("rec");
-  const [epk,  setEpk] =useState(false);
+  // ── UI state ──
+  const [view, setView]= useState("home");
+  const [filt, setFilt]= useState({m:new Date().getMonth(),y:new Date().getFullYear()});
+  const [form, setForm]= useState(mf);
+  const [eid,  setEid] = useState(null);
+  const [bf,   setBf]  = useState(EB);
+  const [cf,   setCf]  = useState(EC);
+  const [catF, setCatF]= useState({label:"",icon:"🎯",type:"despesa"});
+  const [ebid, setEbid]= useState(null);
+  const [ecid, setEcid]= useState(null);
+  const [atab, setAtab]= useState("banks");
+  const [bi,   setBi]  = useState({});
+  const [selC, setSelC]= useState(null);
+  const [mdl,  setMdl] = useState(null);
+  const [tst,  setTst] = useState(null);
+  const [rtab, setRtab]= useState("rec");
+  const [epk,  setEpk] = useState(false);
 
-  useEffect(()=>{LS.s("wt",tx);},[tx]);
-  useEffect(()=>{LS.s("wr",rec);},[rec]);
-  useEffect(()=>{LS.s("wi",inst);},[inst]);
-  useEffect(()=>{LS.s("wb",bnks);},[bnks]);
-  useEffect(()=>{LS.s("wc",crds);},[crds]);
-  useEffect(()=>{LS.s("wbd",budg);},[budg]);
-  useEffect(()=>{LS.s("wcc",ccat);},[ccat]);
+  // ── Debounce save ref ──
+  const saveTimer = useRef(null);
 
-  // 🔐 AQUI
-useEffect(() => {
-  const handleBlur = () => setLocked(true);
+  // ── Auth listener ──
+  useEffect(()=>{
+    const unsub=onAuthStateChanged(auth, async u=>{
+      setUser(u);
+      if(u){
+        // Load data from Firestore
+        const data=await loadUserData(u.uid);
+        if(data.tx)    setTx(data.tx);
+        if(data.rec)   setRec(data.rec);
+        if(data.inst)  setInst(data.inst);
+        if(data.banks) setBnks(data.banks);
+        if(data.cards) setCrds(data.cards);
+        if(data.budg)  setBudg(data.budg);
+        if(data.ccat)  setCcat(data.ccat);
+        if(data.pin)   setSavedPin(data.pin);
+        setDataLoaded(true);
+        setLocked(true);
+      } else {
+        setDataLoaded(false);
+      }
+    });
+    return unsub;
+  },[]);
 
-  window.addEventListener("blur", handleBlur);
+  // ── Lock on blur ──
+  useEffect(()=>{
+    if(!savedPin||!user) return;
+    const onBlur=()=>setLocked(true);
+    window.addEventListener("blur",onBlur);
+    return ()=>window.removeEventListener("blur",onBlur);
+  },[savedPin,user]);
 
-  return () => window.removeEventListener("blur", handleBlur);
-}, []);
+  // ── Save to Firestore (debounced 1.5s) ──
+  const saveToFirestore = useCallback((patch)=>{
+    if(!user) return;
+    if(saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>{ saveUserData(user.uid,patch); },1500);
+  },[user]);
+
+  useEffect(()=>{ if(user&&dataLoaded) saveToFirestore({tx}); },[tx]);
+  useEffect(()=>{ if(user&&dataLoaded) saveToFirestore({rec}); },[rec]);
+  useEffect(()=>{ if(user&&dataLoaded) saveToFirestore({inst}); },[inst]);
+  useEffect(()=>{ if(user&&dataLoaded) saveToFirestore({banks:bnks}); },[bnks]);
+  useEffect(()=>{ if(user&&dataLoaded) saveToFirestore({cards:crds}); },[crds]);
+  useEffect(()=>{ if(user&&dataLoaded) saveToFirestore({budg}); },[budg]);
+  useEffect(()=>{ if(user&&dataLoaded) saveToFirestore({ccat}); },[ccat]);
 
   const toast$=(msg,col="#22c55e")=>{setTst({msg,col});setTimeout(()=>setTst(null),2600);};
+
+  const handleUnlock=(newPin)=>{
+    if(newPin){
+      // First time setup — save pin to Firestore
+      setSavedPin(newPin);
+      saveUserData(user.uid,{pin:newPin});
+    }
+    setLocked(false);
+  };
+
+  const handleLogout=async()=>{
+    await signOut(auth);
+    setTx([]);setRec([]);setInst([]);setBnks([]);setCrds([]);setBudg({});setCcat({receita:[],despesa:[]});
+    setSavedPin("");setLocked(true);setDataLoaded(false);
+    toast$("Sessão encerrada","#f97316");
+  };
+
+  // ── Loading screen ──
+  if(user===undefined) return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",color:"#94a3b8",gap:12}}>
+      <p style={{fontSize:32}}>💰</p>
+      <p style={{fontSize:13}}>Carregando…</p>
+    </div>
+  );
+
+  // ── Not logged in ──
+  if(!user) return <LoginScreen onLogin={()=>{}}/>;
+
+  // ── PIN screen ──
+  if(locked&&dataLoaded) return <PinScreen savedPin={savedPin} onUnlock={handleUnlock}/>;
+
+  // ── Loading data ──
+  if(!dataLoaded) return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"#0f172a",color:"#94a3b8",gap:12}}>
+      <p style={{fontSize:32}}>☁️</p>
+      <p style={{fontSize:13}}>Sincronizando dados…</p>
+    </div>
+  );
 
   const cats=useMemo(()=>({
     receita:[...DC.receita,...(ccat.receita||[]).map(c=>({...c,id:c.id,l:c.label,i:c.icon}))],
@@ -185,6 +336,7 @@ useEffect(() => {
   }),[ccat]);
   const getCat=useCallback(id=>{for(const list of Object.values(cats)){const f=list.find(c=>c.id===id);if(f)return f;}return{l:id,i:"•"};},[cats]);
 
+  // ── Auto-materialise recurring ──
   useEffect(()=>{
     if(!rec.length)return;
     const done=new Set(tx.filter(t=>t.rk).map(t=>t.rk));
@@ -197,6 +349,7 @@ useEffect(() => {
     if(add.length)setTx(p=>{const ex=new Set(p.map(t=>t.id));return[...p,...add.filter(t=>!ex.has(t.id))];});
   },[rec]);
 
+  // ── Auto-materialise installments ──
   useEffect(()=>{
     if(!inst.length)return;
     const now=new Date();const add=[];
@@ -215,9 +368,7 @@ useEffect(() => {
 
   const {m,y}=filt;
   const NOW=new Date();
-
   const confM=useMemo(()=>tx.filter(t=>{const d=pd(t.date);return d.getMonth()===m&&d.getFullYear()===y;}),[tx,m,y]);
-
   const fcasts=useMemo(()=>{
     const items=[];
     for(const tpl of rec){if(!tpl.freq||tpl.freq==="none")continue;
@@ -231,46 +382,26 @@ useEffect(() => {
   },[rec,inst,tx,m,y]);
 
   const allM=useMemo(()=>[...confM.map(t=>({...t,real:true})),...fcasts].sort((a,b)=>pd(b.date)-pd(a.date)),[confM,fcasts]);
-
   const totR=confM.filter(t=>t.type==="receita"&&!t.isTE).reduce((s,t)=>s+t.amt,0);
   const totD=confM.filter(t=>t.type==="despesa"&&!t.isTO).reduce((s,t)=>s+t.amt,0);
   const saldo=totR-totD;
   const fcR=fcasts.filter(f=>f.type==="receita").reduce((s,f)=>s+f.amt,0);
   const fcD=fcasts.filter(f=>f.type==="despesa").reduce((s,f)=>s+f.amt,0);
   const saldoP=(totR+fcR)-(totD+fcD);
-
   const catD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO).reduce((a,t)=>{a[t.cat]=(a[t.cat]||0)+t.amt;return a;},{}),[confM]);
   const catDF=useMemo(()=>[...confM.filter(t=>t.type==="despesa"&&!t.isTO),...fcasts.filter(f=>f.type==="despesa")].reduce((a,t)=>{a[t.cat]=(a[t.cat]||0)+t.amt;return a;},{}),[confM,fcasts]);
-
   const bbal=b=>{const s=tx.filter(t=>t.atype==="bank"&&t.aid===b.id).reduce((s,t)=>s+(t.type==="receita"?t.amt:-t.amt),0);return(parseFloat(b.bal)||0)+s;};
   const tbb=bnks.reduce((s,b)=>s+bbal(b),0);
   const csp=cid=>confM.filter(t=>t.atype==="card"&&t.aid===cid&&t.type==="despesa").reduce((s,t)=>s+t.amt,0);
-
   const alab=t=>{
-    if(t.atype==="bank"){const b=bnks.find(b=>b.id===t.aid);return b?`${b.icon} ${b.name}`:"";}
+    if(t.atype==="bank"){const b=bnks.find(b=>b.id===t.aid);return b?`${b.icon} ${b.name}`:""; }
     if(t.atype==="card"){const c=crds.find(c=>c.id===t.aid);return c?`${c.icon} ${c.name}`:""; }
     return "";
   };
-
   const pM=()=>setFilt(f=>f.m===0?{m:11,y:f.y-1}:{m:f.m-1,y:f.y});
   const nM=()=>setFilt(f=>f.m===11?{m:0,y:f.y+1}:{m:f.m+1,y:f.y});
-
-  const realPie=useMemo(()=>{
-    const e=Object.entries(catD).filter(([,v])=>v>0);
-    const sl=e.map(([id,v],i)=>({l:getCat(id).l,i:getCat(id).i,v,c:PCOLS[i%PCOLS.length]}));
-    const used=e.reduce((s,[,v])=>s+v,0);
-    if(totR>used)sl.push({l:"Saldo livre",v:totR-used,c:"#1e3a5f"});
-    return sl;
-  },[catD,totR,getCat]);
-
-  const prevPie=useMemo(()=>{
-    const e=Object.entries(catDF).filter(([,v])=>v>0);
-    const sl=e.map(([id,v],i)=>({l:getCat(id).l,v,c:PCOLS[i%PCOLS.length]}));
-    const used=e.reduce((s,[,v])=>s+v,0),tot=totR+fcR;
-    if(tot>used)sl.push({l:"Saldo livre",v:tot-used,c:"#1e3a5f"});
-    return sl;
-  },[catDF,totR,fcR,getCat]);
-
+  const realPie=useMemo(()=>{const e=Object.entries(catD).filter(([,v])=>v>0);const sl=e.map(([id,v],i)=>({l:getCat(id).l,i:getCat(id).i,v,c:PCOLS[i%PCOLS.length]}));const used=e.reduce((s,[,v])=>s+v,0);if(totR>used)sl.push({l:"Saldo livre",v:totR-used,c:"#1e3a5f"});return sl;},[catD,totR,getCat]);
+  const prevPie=useMemo(()=>{const e=Object.entries(catDF).filter(([,v])=>v>0);const sl=e.map(([id,v],i)=>({l:getCat(id).l,v,c:PCOLS[i%PCOLS.length]}));const used=e.reduce((s,[,v])=>s+v,0),tot=totR+fcR;if(tot>used)sl.push({l:"Saldo livre",v:tot-used,c:"#1e3a5f"});return sl;},[catDF,totR,fcR,getCat]);
   const riskP=(totR+fcR)>0?(totD+fcD)/(totR+fcR):0;
   const daysM=new Date(y,m+1,0).getDate();
   const dayN=m===NOW.getMonth()&&y===NOW.getFullYear()?NOW.getDate():daysM;
@@ -355,60 +486,11 @@ useEffect(() => {
     {form[atKey]==="bank"&&<select className="fi" value={form[aidKey]} onChange={e=>setForm(f=>({...f,[aidKey]:parseInt(e.target.value)}))}>{bnks.map(b=><option key={b.id} value={b.id}>{b.icon} {b.name}{label==="CONTA ORIGEM"?` (${fmt(bbal(b))})`:""}</option>)}</select>}
     {form[atKey]==="card"&&<select className="fi" value={form[aidKey]} onChange={e=>setForm(f=>({...f,[aidKey]:parseInt(e.target.value)}))}>{crds.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}</select>}
   </div>;
-if (locked) {
-  return (
-    <form style={{
-      display: 'flex',
-      justifyContent: 'center',
-      alignItems: 'center',
-      height: '100vh',
-      flexDirection: 'column',
-      background: '#0f172a',
-      color: '#e2e8f0'
-    }}>
-      <h2 style={{marginBottom: 10}}>
-        {savedPin ? "🔒 Digite seu PIN" : "🔐 Crie um PIN"}
-      </h2>
 
-      <input
-        type="password"
-  value={pinInput}
-  onChange={(e) => setPinInput(e.target.value)}
-  placeholder="••••"
-        style={{
-          padding: 10,
-          fontSize: 18,
-          textAlign: 'center',
-          borderRadius: 8,
-          border: '1px solid #334155',
-          background: '#1e293b',
-          color: '#fff'
-        }}
-      />
-
-      <button
-        onClick={handleUnlock}
-        style={{
-          marginTop: 10,
-          padding: 10,
-          borderRadius: 8,
-          background: '#38bdf8',
-          border: 'none',
-          color: '#fff',
-          fontWeight: 'bold'
-        }}
-      >
-        {savedPin ? "Entrar" : "Salvar PIN"}
-      </button>
-    </form>
-  );
-}
   return(
     <div style={{background:"#0f172a",minHeight:"100vh",fontFamily:"'DM Sans',system-ui,sans-serif",color:"#e2e8f0",maxWidth:480,margin:"0 auto",paddingBottom:80}}>
       <style>{CSS}</style>
-
       {tst&&<div style={{position:"fixed",top:13,left:"50%",transform:"translateX(-50%)",background:tst.col,color:"#fff",padding:"7px 16px",borderRadius:99,fontSize:12,fontWeight:600,zIndex:999,whiteSpace:"nowrap",boxShadow:"0 4px 20px rgba(0,0,0,.5)"}}>{tst.msg}</div>}
-
       {mdl&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:998,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
         <div className="card si" style={{width:"100%",maxWidth:320}}>
           <p style={{fontSize:14,fontWeight:700,marginBottom:5}}>{mdl.title}</p>
@@ -420,12 +502,17 @@ if (locked) {
         </div>
       </div>}
 
+      {/* Header */}
       <div style={{padding:"15px 18px 0",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <span style={{fontSize:12,color:"#64748b",fontWeight:600}}>💰 Minha Carteira</span>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {user?.photoURL&&<img src={user.photoURL} style={{width:26,height:26,borderRadius:"50%"}} alt=""/>}
+          <span style={{fontSize:11,color:"#64748b",fontWeight:600}}>{user?.displayName?.split(" ")[0]||"💰"}</span>
+        </div>
         <div style={{display:"flex",alignItems:"center",gap:7}}>
           <button onClick={pM} style={{background:"#1e293b",border:"none",color:"#94a3b8",width:26,height:26,borderRadius:7,fontSize:14}}>‹</button>
           <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0",minWidth:76,textAlign:"center"}}>{MS[m]} {y}</span>
           <button onClick={nM} style={{background:"#1e293b",border:"none",color:"#94a3b8",width:26,height:26,borderRadius:7,fontSize:14}}>›</button>
+          <button onClick={()=>setMdl({title:"Sair da conta?",body:`Logado como ${user?.email}`,danger:false,btn:"Sair",action:handleLogout})} style={{background:"#1e293b",border:"none",color:"#94a3b8",width:26,height:26,borderRadius:7,fontSize:12}}>↩</button>
         </div>
       </div>
 
@@ -443,12 +530,8 @@ if (locked) {
             {tbb>0&&<div><p style={{fontSize:9,color:"#94a3b8"}}>🏦 Bancos</p><p style={{fontSize:12,fontWeight:600,color:"#38bdf8"}}>{fmt(tbb)}</p></div>}
           </div>
         </div>
-
         {bnks.length>0&&<div>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
-            <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Contas</p>
-            <button onClick={()=>{setView("accounts");setAtab("banks");}} style={{background:"none",border:"none",color:"#38bdf8",fontSize:11}}>gerenciar</button>
-          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}><p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Contas</p><button onClick={()=>{setView("accounts");setAtab("banks");}} style={{background:"none",border:"none",color:"#38bdf8",fontSize:11}}>gerenciar</button></div>
           <div style={{display:"flex",gap:9,overflowX:"auto",paddingBottom:3}}>
             {bnks.map(b=>{const bal=bbal(b);return<div key={b.id} style={{background:b.color+"22",border:`1px solid ${b.color}44`,borderRadius:12,padding:"9px 12px",minWidth:125,flexShrink:0}}>
               <p style={{fontSize:16}}>{b.icon}</p><p style={{fontSize:11,fontWeight:600,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:105}}>{b.name}</p>
@@ -456,12 +539,8 @@ if (locked) {
             </div>;})}
           </div>
         </div>}
-
         {crds.length>0&&<div>
-          <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
-            <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Cartões</p>
-            <button onClick={()=>{setView("accounts");setAtab("cards");}} style={{background:"none",border:"none",color:"#38bdf8",fontSize:11}}>gerenciar</button>
-          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}><p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Cartões</p><button onClick={()=>{setView("accounts");setAtab("cards");}} style={{background:"none",border:"none",color:"#38bdf8",fontSize:11}}>gerenciar</button></div>
           <div style={{display:"flex",gap:9,overflowX:"auto",paddingBottom:3}}>
             {crds.map(c=>{const sp=csp(c.id),lim=parseFloat(c.lim)||0,pct=lim>0?Math.min((sp/lim)*100,100):0,ov=lim>0&&sp>lim;
               return<div key={c.id} onClick={()=>{setSelC(c);setView("card");}} style={{background:c.color+"33",border:`1px solid ${c.color}55`,borderRadius:12,padding:"9px 12px",minWidth:145,flexShrink:0,cursor:"pointer"}}>
@@ -472,12 +551,10 @@ if (locked) {
               </div>;})}
           </div>
         </div>}
-
         <button onClick={()=>{setEid(null);setForm({...mf(),atype:bnks.length>0?"bank":"card",aid:bnks[0]?.id||crds[0]?.id||""});setView("add");}}
           style={{background:"linear-gradient(135deg,#38bdf8,#818cf8)",color:"#fff",border:"none",borderRadius:11,padding:12,fontSize:14,fontWeight:700,width:"100%"}}>
           + Adicionar Lançamento
         </button>
-
         {Object.keys(catD).length>0&&<div className="card">
           <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Por Categoria</p>
           {Object.entries(catD).sort((a,b)=>b[1]-a[1]).map(([cid,val])=>{const cat=getCat(cid),pct=totD>0?(val/totD)*100:0,bg=budg[cid],ov=bg&&val>bg;return<div key={cid} style={{marginBottom:9}}>
@@ -489,7 +566,6 @@ if (locked) {
             {bg&&<p style={{fontSize:9,color:"#64748b",marginTop:1}}>Meta: {fmt(bg)}</p>}
           </div>;})}
         </div>}
-
         {fcasts.length>0&&<div className="card" style={{borderLeft:"3px solid #38bdf8"}}>
           <p style={{fontSize:10,fontWeight:700,color:"#7dd3fc",marginBottom:9}}>🔮 Previsões — {fcasts.length} lançamento{fcasts.length!==1?"s":""}</p>
           {fcasts.slice(0,3).map((fc,i)=>{const cat=getCat(fc.cat);return<div key={i} style={{display:"flex",alignItems:"center",gap:9,padding:"5px 0",borderBottom:i<Math.min(fcasts.length,3)-1?"1px solid #0f172a":"none"}}>
@@ -499,7 +575,6 @@ if (locked) {
           </div>;})}
           {fcasts.length>3&&<button onClick={()=>setView("hist")} style={{background:"none",border:"none",color:"#38bdf8",fontSize:11,marginTop:5}}>ver todos ({fcasts.length})</button>}
         </div>}
-
         {confM.length>0&&<div className="card">
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:9}}>
             <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Recentes</p>
@@ -511,11 +586,10 @@ if (locked) {
             <span style={{fontWeight:700,fontSize:11,color:t.type==="receita"?"#34d399":"#f87171",flexShrink:0}}>{t.type==="receita"?"+":"-"}{fmt(t.amt)}</span>
           </div>;})}
         </div>}
-
         {!tx.length&&!bnks.length&&<div style={{textAlign:"center",padding:"28px 0",color:"#475569"}}>
           <p style={{fontSize:32,marginBottom:9}}>📊</p>
-          <p style={{fontSize:13,fontWeight:600}}>Bem-vindo à sua carteira!</p>
-          <p style={{fontSize:11,marginTop:3,marginBottom:14}}>Comece adicionando um banco ou cartão</p>
+          <p style={{fontSize:13,fontWeight:600}}>Bem-vindo, {user?.displayName?.split(" ")[0]}!</p>
+          <p style={{fontSize:11,marginTop:3,marginBottom:14}}>Seus dados sincronizam em todos os dispositivos ☁️</p>
           <button onClick={()=>setView("accounts")} style={{background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",color:"#fff",borderRadius:11,padding:"10px 20px",fontWeight:600,fontSize:13}}>Adicionar Conta</button>
         </div>}
       </div>}
@@ -634,8 +708,7 @@ if (locked) {
               {[2,3,4,5,6,8,10,12,18,24].map(n=>{const tot=parseFloat(form.tamt)||0;return(
                 <button key={n} onClick={()=>setForm(f=>({...f,icount:String(n)}))}
                   style={{padding:"6px 10px",borderRadius:8,border:"1.5px solid",fontSize:11,fontWeight:600,
-                    borderColor:form.icount==n?"#38bdf8":"#334155",
-                    background:form.icount==n?"#0c1e2e":"transparent",
+                    borderColor:form.icount==n?"#38bdf8":"#334155",background:form.icount==n?"#0c1e2e":"transparent",
                     color:form.icount==n?"#38bdf8":"#64748b",lineHeight:1.4}}>
                   {n}x{tot>0?<><br/><span style={{fontSize:9}}>{fmt(tot/n)}</span></>:""}
                 </button>);})}
@@ -701,22 +774,20 @@ if (locked) {
         </>}
         {rtab==="inst"&&<>
           {!inst.length&&<p style={{textAlign:"center",fontSize:12,color:"#475569",padding:"24px 0"}}>Nenhum parcelamento cadastrado</p>}
-          {inst.map(ins=>{
-            const cat=getCat(ins.cat),paid=tx.filter(t=>t.iid===ins.id).length,rem=ins.icount-paid,al=alab({atype:ins.atype,aid:ins.aid});
-            return<div key={ins.id} className="card">
-              <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:9}}>
-                <div style={{width:38,height:38,borderRadius:10,background:"#450a0a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>{cat.i}</div>
-                <div style={{flex:1,minWidth:0}}><p style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ins.desc}</p><p style={{fontSize:10,color:"#64748b"}}>{al} · {pd(ins.startDate).toLocaleDateString("pt-BR")}</p></div>
-                <div style={{textAlign:"right",flexShrink:0}}><p style={{fontSize:13,fontWeight:700,color:"#f87171"}}>{fmt(ins.tamt/ins.icount)}<span style={{fontSize:9,color:"#64748b"}}>/mês</span></p><p style={{fontSize:9,color:"#64748b"}}>{fmt(ins.tamt)} total</p></div>
-              </div>
-              <div className="pb" style={{marginBottom:7,height:6}}><div className="pf" style={{width:`${Math.min((paid/ins.icount)*100,100)}%`,background:"linear-gradient(90deg,#38bdf8,#818cf8)"}}/></div>
-              <div style={{display:"flex",justifyContent:"space-between",marginBottom:9}}>
-                <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>PAGAS</p><p style={{fontSize:12,fontWeight:700,color:"#34d399"}}>{paid}/{ins.icount}</p><p style={{fontSize:9,color:"#475569"}}>{fmt(paid*(ins.tamt/ins.icount))}</p></div>
-                <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>RESTANTES</p><p style={{fontSize:12,fontWeight:700,color:rem>0?"#f87171":"#34d399"}}>{rem}</p><p style={{fontSize:9,color:"#475569"}}>{fmt(rem*(ins.tamt/ins.icount))}</p></div>
-                <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>TOTAL</p><p style={{fontSize:12,fontWeight:700}}>{ins.icount}x</p><p style={{fontSize:9,color:"#475569"}}>{fmt(ins.tamt)}</p></div>
-              </div>
-              <button onClick={()=>setMdl({title:"Remover parcelamento?",body:"Remove o modelo e todos os lançamentos gerados.",danger:true,btn:"Remover tudo",action:()=>dInst(ins.id)})} className="ab" style={{background:"#450a0a",color:"#f87171",width:"100%",padding:"7px",textAlign:"center"}}>× remover parcelamento</button>
-            </div>;})}
+          {inst.map(ins=>{const cat=getCat(ins.cat),paid=tx.filter(t=>t.iid===ins.id).length,rem=ins.icount-paid,al=alab({atype:ins.atype,aid:ins.aid});return<div key={ins.id} className="card">
+            <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:9}}>
+              <div style={{width:38,height:38,borderRadius:10,background:"#450a0a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>{cat.i}</div>
+              <div style={{flex:1,minWidth:0}}><p style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ins.desc}</p><p style={{fontSize:10,color:"#64748b"}}>{al} · {pd(ins.startDate).toLocaleDateString("pt-BR")}</p></div>
+              <div style={{textAlign:"right",flexShrink:0}}><p style={{fontSize:13,fontWeight:700,color:"#f87171"}}>{fmt(ins.tamt/ins.icount)}<span style={{fontSize:9,color:"#64748b"}}>/mês</span></p><p style={{fontSize:9,color:"#64748b"}}>{fmt(ins.tamt)} total</p></div>
+            </div>
+            <div className="pb" style={{marginBottom:7,height:6}}><div className="pf" style={{width:`${Math.min((paid/ins.icount)*100,100)}%`,background:"linear-gradient(90deg,#38bdf8,#818cf8)"}}/></div>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:9}}>
+              <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>PAGAS</p><p style={{fontSize:12,fontWeight:700,color:"#34d399"}}>{paid}/{ins.icount}</p><p style={{fontSize:9,color:"#475569"}}>{fmt(paid*(ins.tamt/ins.icount))}</p></div>
+              <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>RESTANTES</p><p style={{fontSize:12,fontWeight:700,color:rem>0?"#f87171":"#34d399"}}>{rem}</p><p style={{fontSize:9,color:"#475569"}}>{fmt(rem*(ins.tamt/ins.icount))}</p></div>
+              <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>TOTAL</p><p style={{fontSize:12,fontWeight:700}}>{ins.icount}x</p><p style={{fontSize:9,color:"#475569"}}>{fmt(ins.tamt)}</p></div>
+            </div>
+            <button onClick={()=>setMdl({title:"Remover parcelamento?",body:"Remove o modelo e todos os lançamentos gerados.",danger:true,btn:"Remover tudo",action:()=>dInst(ins.id)})} className="ab" style={{background:"#450a0a",color:"#f87171",width:"100%",padding:"7px",textAlign:"center"}}>× remover parcelamento</button>
+          </div>;})}
         </>}
       </div>}
 
@@ -878,7 +949,6 @@ if (locked) {
         </div>;})}
       </div>}
 
-      {/* ── Nav ── */}
       <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"#1e293b",borderTop:"1px solid #334155",display:"flex",padding:"5px 0 9px"}}>
         {[
           {id:"home",    label:"Início",  icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>},
