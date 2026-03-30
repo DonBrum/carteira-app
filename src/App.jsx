@@ -26,22 +26,27 @@ const isBiz=d=>{const w=d.getDay();if(w===0||w===6)return false;return!HOL.has(`
 const adjBiz=(s,r)=>{if(r==="ignore")return s;let d=pd(s);if(isBiz(d))return s;const st=r==="next"?1:-1;let g=0;while(!isBiz(d)&&g++<15)d.setDate(d.getDate()+st);return d.toISOString().split("T")[0];};
 const addF=(s,f)=>{const d=pd(s);if(f==="weekly")d.setDate(d.getDate()+7);else if(f==="biweekly")d.setDate(d.getDate()+14);else if(f==="monthly")d.setMonth(d.getMonth()+1);else if(f==="bimonthly")d.setMonth(d.getMonth()+2);else if(f==="quarterly")d.setMonth(d.getMonth()+3);else if(f==="semiannual")d.setMonth(d.getMonth()+6);else if(f==="annual")d.setFullYear(d.getFullYear()+1);else return null;return d.toISOString().split("T")[0];};
 
-// ── NEW: card billing date ─────────────────────────────────────────────────────
-// Returns the next due date on or after the purchase date based on card due day
-const cardPayDate=(purchaseDate,dueDay)=>{
-  const due=parseInt(dueDay)||10;
+// ── Card billing cycle ────────────────────────────────────────────────────────
+// closingDay = dia de fechamento da fatura (ex: 10)
+// dueDay     = dia de vencimento (ex: 17)
+// Compra ANTES ou NO dia de fechamento → paga neste ciclo (vence dueDay deste mês)
+// Compra APÓS o fechamento → paga no próximo ciclo (vence dueDay do próximo mês)
+const cardPayDate=(purchaseDate, closingDay, dueDay)=>{
+  const closing=parseInt(closingDay)||10;
+  const due=parseInt(dueDay)||17;
   const d=pd(purchaseDate);
   const day=d.getDate();
-  // If purchased on or before due day → billing closes this month
-  // If purchased after due day → billing closes next month
-  const targetMonth=day<=due?d.getMonth():d.getMonth()+1;
+  // If purchased on or before closing day → this month's cycle
+  // If purchased after closing day → next month's cycle
+  const addMonth=day>closing?1:0;
+  const targetMonth=d.getMonth()+addMonth;
   const targetYear=d.getFullYear()+(targetMonth>11?1:0);
   return new Date(targetYear,targetMonth%12,due).toISOString().split("T")[0];
 };
 
 const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:""});
 const EB={name:"",bal:"",color:BCOLS[0],icon:"🏦",hidden:false};
-const EC={name:"",lim:"",color:CCOLS[0],icon:"💳",due:"10"};
+const EC={name:"",lim:"",color:CCOLS[0],icon:"💳",closing:"10",due:"17"};
 
 // ── Firestore ──────────────────────────────────────────────────────────────────
 const userDoc=uid=>doc(db,"users",uid);
@@ -335,7 +340,7 @@ export default function App(){
       for(const o of autoOccs(tpl,done)){
         // Compute payDate if card
         const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
-        const payDate=card?cardPayDate(o.date,card.due):undefined;
+        const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
         add.push({id:`r_${tpl.id}_${o.orig}`,rk:o.key,rid:tpl.id,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:o.date,payDate,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid,auto:true,paid:tpl.autoPaid===true});
       }
     }
@@ -354,7 +359,7 @@ export default function App(){
         const iid=`i_${ins.id}_${i+1}`;
         if(!tx.find(t=>t.id===iid)){
           const card=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
-          const payDate=card?cardPayDate(adj,card.due):undefined;
+          const payDate=card?cardPayDate(adj,card.closing,card.due):undefined;
           add.push({id:iid,iid:ins.id,iidx:i+1,type:ins.type,amt:ins.tamt/ins.icount,desc:ins.desc,cat:ins.cat,date:adj,payDate,note:ins.note||"",atype:ins.atype,aid:ins.aid,auto:true,paid:false});
         }
       }
@@ -379,7 +384,7 @@ export default function App(){
       for(const o of recInMonth(tpl,m,y)){const d=pd(o.date);if(d<=NOW)continue;
         if(!tx.find(t=>t.rk===`${tpl.id}__${o.orig}`)){
           const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
-          const payDate=card?cardPayDate(o.date,card.due):undefined;
+          const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
           items.push({_fid:`fr_${tpl.id}_${o.orig}`,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:o.date,payDate,atype:tpl.atype,aid:tpl.aid,isRF:true,rid:tpl.id,orig:o.orig});
         }
       }
@@ -389,7 +394,7 @@ export default function App(){
         const iid=`i_${ins.id}_${o.idx}`;
         if(!tx.find(t=>t.id===iid)){
           const card=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
-          const payDate=card?cardPayDate(o.date,card.due):undefined;
+          const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
           items.push({_fid:`fi_${ins.id}_${o.idx}`,type:ins.type,amt:o.amt,desc:ins.desc,cat:ins.cat,date:o.date,payDate,atype:ins.atype,aid:ins.aid,isIF:true,iidx:o.idx,icount:ins.icount,tamt:ins.tamt});
         }
       }
@@ -428,7 +433,20 @@ export default function App(){
   const visibleBnks=useMemo(()=>bnks.filter(b=>!b.hidden),[bnks]);
   const tbb=useMemo(()=>visibleBnks.reduce((s,b)=>s+bbal(b),0),[visibleBnks,bbal]);
 
-  const csp=useCallback(cid=>confM.filter(t=>t.atype==="card"&&t.aid===cid&&t.type==="despesa"&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
+  // csp: total spent on card IN THE CURRENT BILLING CYCLE
+  // Cycle = purchases whose payDate falls in month m/y
+  // This correctly shows what will be billed regardless of purchase month
+  const csp=useCallback(cid=>{
+    const card=crds.find(c=>c.id===cid);
+    if(!card)return 0;
+    return tx.filter(t=>{
+      if(t.atype!=="card"||t.aid!==cid||t.type!=="despesa")return false;
+      // Compute payDate for this tx (it may already be stored, or compute it)
+      const payD=t.payDate||cardPayDate(t.date,card.closing,card.due);
+      const d=pd(payD);
+      return d.getMonth()===m&&d.getFullYear()===y;
+    }).reduce((s,t)=>s+t.amt,0);
+  },[tx,crds,m,y]);
   const alab=useCallback(t=>{
     if(t.atype==="bank"){const b=bnks.find(b=>b.id===t.aid);return b?`${b.icon} ${b.name}`:""; }
     if(t.atype==="card"){const c=crds.find(c=>c.id===t.aid);return c?`${c.icon} ${c.name}`:""; }
@@ -501,7 +519,7 @@ export default function App(){
       const d=pd(form.date);d.setMonth(d.getMonth()+i);
       const raw=d.toISOString().split("T")[0];
       const adj=adjBiz(raw,form.bday||"ignore");
-      const pay=card?cardPayDate(adj,card.due):adj;
+      const pay=card?cardPayDate(adj,card.closing,card.due):adj;
       res.push({n:i+1,purchaseDate:adj,payDate:pay,amt:amt/ic});
     }
     return res;
@@ -551,7 +569,7 @@ export default function App(){
     const adjD=adjBiz(form.date,form.bday);
     // Compute card payDate
     const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
-    const payDate=cardObj?cardPayDate(adjD,cardObj.due):undefined;
+    const payDate=cardObj?cardPayDate(adjD,cardObj.closing,cardObj.due):undefined;
     if(eid){
       setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid}:t));
       setEid(null);toast$("Atualizado ✓");
@@ -575,7 +593,7 @@ export default function App(){
     if(fc.isRF&&fc.rid&&fc.orig){
       const tpl=rec.find(r=>r.id===fc.rid);if(!tpl)return;
       const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
-      const payDate=card?cardPayDate(fc.date,card.due):undefined;
+      const payDate=card?cardPayDate(fc.date,card.closing,card.due):undefined;
       const newId=`r_${tpl.id}_${fc.orig}`;
       const newTx={id:newId,rk:`${tpl.id}__${fc.orig}`,rid:tpl.id,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:fc.date,payDate,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid,auto:true,paid:false};
       setTx(p=>{const ex=new Set(p.map(t=>t.id));return ex.has(newId)?p:[newTx,...p];});
@@ -619,7 +637,7 @@ export default function App(){
     const {tpl}=recEditMdl;
     // Keep template, only update this specific tx
     const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
-    const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.due):undefined;
+    const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.closing,cardObj.due):undefined;
     const rawA=parseFloat(String(form.amt).replace(",","."));
     setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:tpl.startDate,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid}:t));
     setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Lançamento atualizado ✓");
@@ -750,7 +768,7 @@ export default function App(){
         {bnks.map(b=><option key={b.id} value={b.id}>{b.icon} {b.name}{b.hidden?" (oculta)":""}{label==="CONTA ORIGEM"?` (${fmt(bbal(b))})`:""}</option>)}
       </select>}
       {form[atKey]==="card"&&crds.length>0&&<select className="fi" value={form[aidKey]} onChange={e=>setForm(f=>({...f,[aidKey]:parseInt(e.target.value)}))}>
-        {crds.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name} (vence dia {c.due})</option>)}
+        {crds.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name} (fecha {c.closing||10} · vence {c.due})</option>)}
       </select>}
     </div>
   );
@@ -787,7 +805,7 @@ export default function App(){
                 const {tpl}=recEditMdl;
                 const rawA=parseFloat(String(form.amt).replace(",","."));
                 const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
-                const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.due):undefined;
+                const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.closing,cardObj.due):undefined;
                 if(eid){
                   setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,payDate}:t));
                 } else {
@@ -890,7 +908,7 @@ export default function App(){
                   <p style={{fontSize:12,fontWeight:600,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:135}}>{c.name}</p>
                   <p style={{fontSize:13,fontWeight:700,color:ov?"#f87171":"#e2e8f0",fontFamily:"'DM Mono',monospace",marginTop:2}}>{fmt(sp)}{lim>0?` / ${fmt(lim)}`:""}</p>
                   {lim>0&&<div className="pb" style={{marginTop:6}}><div className="pf" style={{width:`${pct}%`,background:ov?"#ef4444":c.color}}/></div>}
-                  <p style={{fontSize:9,color:"#64748b",marginTop:4}}>Vence dia {c.due}</p>
+                  <p style={{fontSize:9,color:"#64748b",marginTop:4}}>Fecha {c.closing||10} · Vence {c.due}</p>
                 </div>
               );})}
             </div>
@@ -1111,7 +1129,7 @@ export default function App(){
               const card=crds.find(c=>c.id==(parseInt(form.aid)||form.aid));
               if(!card)return null;
               const adj=adjBiz(form.date,form.bday||"ignore");
-              const pay=cardPayDate(adj,card.due);
+              const pay=cardPayDate(adj,card.closing,card.due);
               return<div style={{background:"#0f172a",borderRadius:10,padding:"9px 13px",border:"1px solid #334155"}}>
                 <p style={{fontSize:10,color:"#94a3b8",marginBottom:3,fontWeight:600}}>VENCIMENTO NO CARTÃO</p>
                 <div style={{display:"flex",justifyContent:"space-between"}}>
@@ -1305,7 +1323,7 @@ export default function App(){
                 <div className="vc" style={{background:`linear-gradient(135deg,${c.color},${c.color}88)`}}>
                   <div style={{position:"absolute",top:-18,right:-18,width:90,height:90,borderRadius:"50%",background:"rgba(255,255,255,.06)"}}/>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                    <p style={{fontSize:22}}>{c.icon}</p><p style={{fontSize:10,color:"rgba(255,255,255,.6)"}}>Vence dia {c.due}</p>
+                    <p style={{fontSize:22}}>{c.icon}</p><p style={{fontSize:10,color:"rgba(255,255,255,.6)"}}>Fecha {c.closing||10} · Vence {c.due}</p>
                   </div>
                   <p style={{fontSize:15,fontWeight:700,color:"#fff",marginTop:8}}>{c.name}</p>
                   <div style={{display:"flex",gap:18,marginTop:8}}>
@@ -1317,7 +1335,7 @@ export default function App(){
                 </div>
                 <div style={{display:"flex",gap:7,marginTop:8,marginBottom:6}}>
                   <button onClick={()=>{setSelC(c);nav("card");}} className="ab" style={{flex:1,background:"#1e293b",color:"#94a3b8",padding:"9px 0",textAlign:"center"}}>ver fatura</button>
-                  <button onClick={()=>{setEcid(c.id);setCf({name:c.name,lim:String(c.lim),color:c.color,due:c.due,icon:c.icon});}} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>
+                  <button onClick={()=>{setEcid(c.id);setCf({name:c.name,lim:String(c.lim),color:c.color,closing:c.closing||"10",due:c.due,icon:c.icon});}} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>
                   <button onClick={()=>setMdl({title:"Remover cartão?",body:"Os lançamentos permanecem.",danger:true,btn:"Remover",action:()=>dCard(c.id)})} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>
                 </div>
               </div>
@@ -1328,12 +1346,19 @@ export default function App(){
               <input className="fi" placeholder="Nome do cartão" value={cf.name} onChange={e=>setCf(f=>({...f,name:e.target.value}))}/>
               <input className="fi" type="number" inputMode="decimal" placeholder="Limite (R$) — opcional" value={cf.lim} onChange={e=>setCf(f=>({...f,lim:e.target.value}))}/>
               <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                <p style={{fontSize:12,color:"#94a3b8",whiteSpace:"nowrap",flexShrink:0}}>Fecha dia:</p>
+                <input className="fi" type="number" inputMode="numeric" min="1" max="31" placeholder="10" value={cf.closing} onChange={e=>setCf(f=>({...f,closing:e.target.value}))}/>
+              </div>
+              <div style={{display:"flex",gap:10,alignItems:"center"}}>
                 <p style={{fontSize:12,color:"#94a3b8",whiteSpace:"nowrap",flexShrink:0}}>Vence dia:</p>
-                <input className="fi" type="number" inputMode="numeric" min="1" max="31" placeholder="10" value={cf.due} onChange={e=>setCf(f=>({...f,due:e.target.value}))}/>
+                <input className="fi" type="number" inputMode="numeric" min="1" max="31" placeholder="17" value={cf.due} onChange={e=>setCf(f=>({...f,due:e.target.value}))}/>
               </div>
               <div style={{background:"#0f172a",borderRadius:10,padding:"9px 13px",border:"1px solid #334155"}}>
-                <p style={{fontSize:9,color:"#64748b",marginBottom:4}}>COMO FUNCIONA O VENCIMENTO</p>
-                <p style={{fontSize:11,color:"#94a3b8",lineHeight:1.5}}>Compras antes do dia {cf.due||10} → pagamento neste mês. Compras após o dia {cf.due||10} → pagamento no mês seguinte.</p>
+                <p style={{fontSize:9,color:"#64748b",marginBottom:4}}>COMO FUNCIONA O CICLO</p>
+                <p style={{fontSize:11,color:"#94a3b8",lineHeight:1.6}}>
+                  Compras até dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fatura vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> deste mês.<br/>
+                  Compras após dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fatura vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> do mês seguinte.
+                </p>
               </div>
               <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{CCOLS.map(c=><div key={c} className={`cdot ${cf.color===c?"on":""}`} onClick={()=>setCf(f=>({...f,color:c}))} style={{background:c}}/>)}</div>
               <div style={{display:"flex",gap:8}}>
@@ -1405,7 +1430,7 @@ export default function App(){
                 <div><p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>DISPONÍVEL</p><p style={{fontSize:14,fontWeight:700,color:av>=0?"#a7f3d0":"#fca5a5",fontFamily:"'DM Mono',monospace",marginTop:6}}>{fmt(av)}</p></div></>}
               </div>
               {lim>0&&<div style={{marginTop:10,height:4,background:"rgba(255,255,255,.2)",borderRadius:99,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:pct>85?"#f87171":"rgba(255,255,255,.8)",borderRadius:99,transition:"width .4s"}}/></div>}
-              <p style={{fontSize:10,color:"rgba(255,255,255,.5)",marginTop:6}}>Vencimento: dia {selC.due}</p>
+              <p style={{fontSize:10,color:"rgba(255,255,255,.5)",marginTop:6}}>Fecha dia {selC.closing||10} · Vence dia {selC.due}</p>
             </div>
             {cInst.length>0&&<div className="card">
               <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Parcelamentos neste cartão</p>
