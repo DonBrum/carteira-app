@@ -308,20 +308,46 @@ export default function App(){
     return()=>{document.removeEventListener("visibilitychange",lock);window.removeEventListener("blur",lockBlur);};
   },[savedPin,user]);
 
-  // ── Debounced Firestore save ──
-  const saveToFirestore=useCallback((patch)=>{
+  // ── Refs para ter sempre o valor atual nos saves ──
+  const txRef   = useRef(tx);
+  const recRef  = useRef(rec);
+  const instRef = useRef(inst);
+  const bnksRef = useRef(bnks);
+  const crdsRef = useRef(crds);
+  const budgRef = useRef(budg);
+  const ccatRef = useRef(ccat);
+  useEffect(()=>{txRef.current=tx;},[tx]);
+  useEffect(()=>{recRef.current=rec;},[rec]);
+  useEffect(()=>{instRef.current=inst;},[inst]);
+  useEffect(()=>{bnksRef.current=bnks;},[bnks]);
+  useEffect(()=>{crdsRef.current=crds;},[crds]);
+  useEffect(()=>{budgRef.current=budg;},[budg]);
+  useEffect(()=>{ccatRef.current=ccat;},[ccat]);
+
+  // ── Debounced Firestore save — salva TUDO de uma vez ──
+  const saveToFirestore=useCallback(()=>{
     if(!user)return;
     if(saveTimer.current)clearTimeout(saveTimer.current);
-    saveTimer.current=setTimeout(()=>saveUserData(user.uid,patch),1500);
+    saveTimer.current=setTimeout(()=>{
+      saveUserData(user.uid,{
+        tx:    txRef.current,
+        rec:   recRef.current,
+        inst:  instRef.current,
+        banks: bnksRef.current,
+        cards: crdsRef.current,
+        budg:  budgRef.current,
+        ccat:  ccatRef.current,
+      });
+    },800);
   },[user]);
 
-  useEffect(()=>{if(user&&dataLoaded)saveToFirestore({tx});},[tx,user,dataLoaded]);
-  useEffect(()=>{if(user&&dataLoaded)saveToFirestore({rec});},[rec,user,dataLoaded]);
-  useEffect(()=>{if(user&&dataLoaded)saveToFirestore({inst});},[inst,user,dataLoaded]);
-  useEffect(()=>{if(user&&dataLoaded)saveToFirestore({banks:bnks});},[bnks,user,dataLoaded]);
-  useEffect(()=>{if(user&&dataLoaded)saveToFirestore({cards:crds});},[crds,user,dataLoaded]);
-  useEffect(()=>{if(user&&dataLoaded)saveToFirestore({budg});},[budg,user,dataLoaded]);
-  useEffect(()=>{if(user&&dataLoaded)saveToFirestore({ccat});},[ccat,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[tx,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[rec,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[inst,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[bnks,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[crds,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[budg,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[ccat,user,dataLoaded]);
 
   // ── Merged categories ──
   const cats=useMemo(()=>({
