@@ -223,7 +223,8 @@ button{cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparen
 .tog.on::after{left:21px}.tog.off::after{left:3px}
 .vc{border-radius:18px;padding:18px;position:relative;overflow:hidden}
 .fc{border-left:3px solid #7dd3fc;opacity:.75}
-.unpaid-row{opacity:.6;border-left:3px solid #f59e0b}
+.unpaid-row{opacity:.65;border-left:3px solid #f59e0b}
+.overdue-row{opacity:.8;border-left:3px solid #ef4444}
 select.fi{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;padding-right:36px}
 select option{background:#1e293b;color:#e2e8f0}
 `;
@@ -263,6 +264,7 @@ export default function App(){
   const [tst,  setTst] = useState(null);
   const [rtab, setRtab]= useState("rec");
   const [epk,  setEpk] = useState(false);
+  const [recEditMdl, setRecEditMdl]= useState(null); // {rec, form} for "só este / seguintes" modal
   const saveTimer      = useRef(null);
   const mainRef        = useRef(null);
 
@@ -470,6 +472,24 @@ export default function App(){
     setTx(p=>p.map(t=>t.id===id?{...t,paid:t.paid===false?true:false}:t));
   },[]);
 
+  // ── Auto-confirm: bank auto transactions whose date has passed ──
+  useEffect(()=>{
+    if(!dataLoaded)return;
+    const today=new Date();today.setHours(0,0,0,0);
+    setTx(p=>{
+      let changed=false;
+      const next=p.map(t=>{
+        // Only bank auto transactions that are still pending
+        if(t.atype==="bank"&&t.auto&&t.paid===false){
+          const d=pd(t.date);d.setHours(0,0,0,0);
+          if(d<=today){changed=true;return{...t,paid:true};}
+        }
+        return t;
+      });
+      return changed?next:p;
+    });
+  },[dataLoaded,tx.length]);
+
   // ── Installment preview (hook must be before any early return) ──
   const instPreview=useMemo(()=>{
     if(!form.inst||!form.tamt||!form.date)return[];
@@ -520,8 +540,12 @@ export default function App(){
     }
     if(form.freq!=="none"||recEid){
       const tpl={id:recEid||Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,startDate:form.date,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,freq:form.freq,bday:form.bday,autoPaid:form.autoPaid||false};
-      if(recEid){setRec(p=>p.map(r=>r.id===recEid?tpl:r));setRecEid(null);toast$("Recorrência atualizada ✓");}
-      else{setRec(p=>[...p,tpl]);toast$("Recorrência salva ✓");}
+      if(recEid){
+        // Show choice: update only template (future) or also this single occurrence
+        setRecEditMdl({tpl, formSnap:{...form}});
+        return; // modal will call submitRecEdit
+      }
+      setRec(p=>[...p,tpl]);toast$("Recorrência salva ✓");
       setForm(mf());nav("home");return;
     }
     const adjD=adjBiz(form.date,form.bday);
@@ -532,14 +556,41 @@ export default function App(){
       setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid}:t));
       setEid(null);toast$("Atualizado ✓");
     } else {
-      setTx(p=>[{id:Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,paid:true},...p]);
+      const isPaidNow=form.atype==="card"?false:(form.autoPaid!==false); // card purchases always start as unpaid-tracking; bank defaults to paid unless toggled off
+      setTx(p=>[{id:Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,paid:isPaidNow},...p]);
       toast$(form.type==="receita"?"Receita adicionada ✓":"Despesa adicionada ✓");
     }
     setForm(mf());nav("home");
   };
 
-  const startE=t=>{setEid(t.id);setForm({...mf(),type:t.type,amt:String(t.amt),desc:t.desc,cat:t.cat,date:t.date,note:t.note||"",atype:t.atype||"bank",aid:t.aid||""});nav("add");};
-  const startRecE=r=>{setRecEid(r.id);setForm({...mf(),type:r.type,amt:String(r.amt),desc:r.desc,cat:r.cat,date:r.startDate,note:r.note||"",atype:r.atype||"bank",aid:r.aid||"",freq:r.freq||"monthly",bday:r.bday||"ignore",autoPaid:r.autoPaid||false});nav("add");};
+  const startE=t=>{
+    setEid(t.id);
+    setForm({...mf(),type:t.type,amt:String(t.amt),desc:t.desc,cat:t.cat,date:t.date,note:t.note||"",atype:t.atype||"bank",aid:t.aid||""});
+    nav("add");
+  };
+
+  // Edit a pending (forecast) transaction — materialise it first then edit
+  const startFcastE=fc=>{
+    // For forecast recurring: create the tx entry then edit
+    if(fc.isRF&&fc.rid&&fc.orig){
+      const tpl=rec.find(r=>r.id===fc.rid);if(!tpl)return;
+      const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
+      const payDate=card?cardPayDate(fc.date,card.due):undefined;
+      const newId=`r_${tpl.id}_${fc.orig}`;
+      const newTx={id:newId,rk:`${tpl.id}__${fc.orig}`,rid:tpl.id,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:fc.date,payDate,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid,auto:true,paid:false};
+      setTx(p=>{const ex=new Set(p.map(t=>t.id));return ex.has(newId)?p:[newTx,...p];});
+      setEid(newId);
+      setForm({...mf(),type:tpl.type,amt:String(tpl.amt),desc:tpl.desc,cat:tpl.cat,date:fc.date,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid});
+      nav("add");
+    }
+  };
+
+  // Recurring edit — show modal: "só este" vs "este e seguintes"
+  const startRecE=r=>{
+    setRecEid(r.id);
+    setForm({...mf(),type:r.type,amt:String(r.amt),desc:r.desc,cat:r.cat,date:r.startDate,note:r.note||"",atype:r.atype||"bank",aid:r.aid||"",freq:r.freq||"monthly",bday:r.bday||"ignore",autoPaid:r.autoPaid||false});
+    nav("add");
+  };
   const dTx=id=>{setTx(p=>p.filter(t=>t.id!==id));toast$("Removido","#f97316");};
   const dRec=id=>{setRec(p=>p.filter(r=>r.id!==id));setTx(p=>p.filter(t=>t.rid!==id));toast$("Removida","#f97316");};
   const dInst=id=>{setInst(p=>p.filter(i=>i.id!==id));setTx(p=>p.filter(t=>t.iid!==id));toast$("Removido","#f97316");};
@@ -551,6 +602,30 @@ export default function App(){
   const dCard=id=>{setCrds(p=>p.filter(c=>c.id!==id));toast$("Removido","#f97316");};
   const toggleHidden=id=>{setBnks(p=>p.map(b=>b.id===id?{...b,hidden:!b.hidden}:b));};
 
+  // ── Recurring edit handlers ──
+  // "Só este e seguintes" — update template startDate + amt/desc from the chosen date
+  const submitRecEditFuture=()=>{
+    if(!recEditMdl)return;
+    const {tpl}=recEditMdl;
+    // Remove future auto-generated tx from the old template (from chosen startDate onwards)
+    setTx(p=>p.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(tpl.startDate))));
+    setRec(p=>p.map(r=>r.id===tpl.id?tpl:r));
+    setRecEid(null);setRecEditMdl(null);toast$("Recorrência atualizada (seguintes) ✓");
+    setForm(mf());nav("home");
+  };
+  // "Somente este" — keep template unchanged, just update the single materialised tx
+  const submitRecEditOne=()=>{
+    if(!recEditMdl||!eid)return;
+    const {tpl}=recEditMdl;
+    // Keep template, only update this specific tx
+    const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
+    const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.due):undefined;
+    const rawA=parseFloat(String(form.amt).replace(",","."));
+    setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:tpl.startDate,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid}:t));
+    setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Lançamento atualizado ✓");
+    setForm(mf());nav("home");
+  };
+
 
 
   // ── Shared UI ──
@@ -561,50 +636,95 @@ export default function App(){
     </div>
   );
 
-  const TxRow=({t,onE,onD,onTogglePaid})=>{
-    const cat=getCat(t.cat);const isTr=t.isTO||t.isTE;const al=alab(t);
-    const isPaid=t.paid!==false;
+  const TxRow=({t,onE,onD,onTogglePaid,onFcastE})=>{
+    const cat=getCat(t.cat);
+    const isTr=t.isTO||t.isTE;
+    const al=alab(t);
     const isCard=t.atype==="card";
+    const isPaid=t.paid!==false;
     const billingDate=isCard&&t.payDate?t.payDate:null;
+    const today=new Date();today.setHours(0,0,0,0);
+
+    // Badge logic:
+    // Card purchase: no paid/pending badge (purchase already happened); show "atrasado" only if fatura date passed unpaid
+    // Bank manual: pending → atrasado if date passed
+    // Bank auto: auto-confirmed by effect, so if still pending here it's edge case
+    const isOverdue=t.real&&t.paid===false&&(()=>{
+      if(isCard){
+        // Card: overdue if payDate has passed
+        const checkDate=billingDate?pd(billingDate):pd(t.date);
+        checkDate.setHours(0,0,0,0);
+        return checkDate<today;
+      } else {
+        const d=pd(t.date);d.setHours(0,0,0,0);
+        return d<today;
+      }
+    })();
+
+    const showPaidToggle=t.real&&!isTr&&!isCard&&onTogglePaid;
+    const showCardStatus=t.real&&!isTr&&isCard;
+
     return(
-      <div className={`card ${t.real===false?"fc":""} ${!isPaid&&t.real?"unpaid-row":""}`} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px"}}>
-        {/* Paid indicator / toggle */}
-        {t.real&&!isTr&&onTogglePaid&&(
-          <button onClick={()=>onTogglePaid(t.id)} title={isPaid?"Marcar como pendente":"Confirmar pagamento"}
-            style={{width:22,height:22,borderRadius:"50%",border:`2px solid ${isPaid?"#34d399":"#f59e0b"}`,background:isPaid?"#064e3b":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:12,color:isPaid?"#34d399":"#f59e0b",cursor:"pointer"}}>
-            {isPaid?"✓":"○"}
+      <div className={`card ${t.real===false?"fc":""} ${!isPaid&&t.real&&!isCard?"unpaid-row":""} ${isOverdue?"overdue-row":""}`}
+        style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px"}}>
+
+        {/* Paid toggle — only for bank transactions */}
+        {showPaidToggle&&(
+          <button onClick={()=>onTogglePaid(t.id)}
+            title={isPaid?"Marcar como pendente":"Confirmar pagamento"}
+            style={{width:24,height:24,borderRadius:"50%",border:`2px solid ${isOverdue?"#ef4444":isPaid?"#34d399":"#f59e0b"}`,background:isPaid?"#064e3b":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:12,color:isPaid?"#34d399":isOverdue?"#ef4444":"#f59e0b"}}>
+            {isPaid?"✓":"!"}
           </button>
         )}
+
         <div style={{width:36,height:36,borderRadius:10,background:isTr?"#1e3a5f":t.type==="receita"?"#064e3b":"#450a0a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>
           {isTr?"↔️":cat.i}
         </div>
+
         <div style={{flex:1,minWidth:0}}>
-          <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"nowrap"}}>
-            <p style={{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</p>
+          <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+            <p style={{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%"}}>{t.desc}</p>
             {t.iidx&&<span className="bdg" style={{background:"#1e3a5f",color:"#7dd3fc",flexShrink:0}}>{t.iidx}/{t.icount}</span>}
             {t.auto&&t.rid&&<span className="bdg" style={{background:"#2d1a4f",color:"#c4b5fd",flexShrink:0}}>🔁</span>}
             {!t.real&&<span className="bdg" style={{background:"#0c2340",color:"#7dd3fc",flexShrink:0}}>🔮</span>}
-            {!isPaid&&t.real&&<span className="bdg" style={{background:"#451a03",color:"#f59e0b",flexShrink:0}}>pendente</span>}
+            {/* Bank status badges */}
+            {!isCard&&!isTr&&t.real&&!isPaid&&!isOverdue&&<span className="bdg" style={{background:"#451a03",color:"#f59e0b",flexShrink:0}}>pendente</span>}
+            {!isCard&&!isTr&&t.real&&isOverdue&&<span className="bdg" style={{background:"#450a0a",color:"#ef4444",flexShrink:0}}>atrasado</span>}
+            {/* Card fatura overdue badge */}
+            {showCardStatus&&isOverdue&&<span className="bdg" style={{background:"#450a0a",color:"#ef4444",flexShrink:0}}>fatura atrasada</span>}
           </div>
           <p style={{fontSize:10,color:"#64748b",marginTop:1}}>
             {billingDate
-              ? <>compra {pd(t.date).toLocaleDateString("pt-BR")} · venc {pd(billingDate).toLocaleDateString("pt-BR")}</>
+              ? <><span>compra {pd(t.date).toLocaleDateString("pt-BR")}</span><span style={{color:isOverdue?"#ef4444":"#64748b"}}> · venc {pd(billingDate).toLocaleDateString("pt-BR")}</span></>
               : pd(t.date).toLocaleDateString("pt-BR")
             }
             {al?` · ${al}`:""}
           </p>
         </div>
+
         <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:5,flexShrink:0}}>
           <span style={{fontWeight:700,fontSize:13,color:t.type==="receita"?"#34d399":"#f87171"}}>
             {t.type==="receita"?"+":"-"}{fmt(t.amt)}
           </span>
+          {/* Edit button for pending/forecast */}
+          {!t.real&&onFcastE&&(t.isRF)&&(
+            <button onClick={()=>onFcastE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>
+          )}
+          {/* Edit/delete for real non-auto tx */}
           {t.real&&!t.auto&&!isTr&&(
             <div style={{display:"flex",gap:5}}>
               {onE&&<button onClick={()=>onE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>}
               <button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>
             </div>
           )}
-          {t.real&&(t.auto||isTr)&&<button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>}
+          {/* Edit/delete for real auto tx (pending ones can be edited) */}
+          {t.real&&t.auto&&!isTr&&(
+            <div style={{display:"flex",gap:5}}>
+              {!isPaid&&onE&&<button onClick={()=>onE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>}
+              <button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>
+            </div>
+          )}
+          {t.real&&isTr&&<button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>}
         </div>
       </div>
     );
@@ -655,7 +775,52 @@ export default function App(){
         </div>
       </div>}
 
-      {/* Header */}
+      {/* Recurring Edit Modal — "só este" vs "este e seguintes" */}
+      {recEditMdl&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:998,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div className="card si" style={{width:"100%",maxWidth:340}}>
+            <p style={{fontSize:16,fontWeight:700,marginBottom:6}}>✏️ Editar recorrência</p>
+            <p style={{fontSize:12,color:"#94a3b8",marginBottom:20,lineHeight:1.6}}>Deseja aplicar as alterações apenas a este mês, ou a partir deste mês em diante?</p>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              <button onClick={()=>{
+                // "Somente este" — update only the existing materialised tx if it exists, otherwise create it
+                const {tpl}=recEditMdl;
+                const rawA=parseFloat(String(form.amt).replace(",","."));
+                const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
+                const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.due):undefined;
+                if(eid){
+                  setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,payDate}:t));
+                } else {
+                  // Materialise as override
+                  const key=`${tpl.id}__${tpl.startDate}`;
+                  const newId=`r_${tpl.id}_${tpl.startDate}`;
+                  setTx(p=>{const ex=new Set(p.map(t=>t.id));return ex.has(newId)?p:[{id:newId,rk:key,rid:tpl.id,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:tpl.startDate,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,auto:true,paid:false},...p];});
+                }
+                setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Este lançamento atualizado ✓");setForm(mf());nav("home");
+              }} style={{padding:14,background:"#1e3a5f",border:"1px solid #38bdf8",borderRadius:11,color:"#38bdf8",fontWeight:600,fontSize:14,textAlign:"left"}}>
+                📌 Somente este lançamento
+                <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>Altera apenas este mês. Os demais continuam iguais.</p>
+              </button>
+              <button onClick={()=>{
+                // "Este e seguintes" — update template from this date onwards
+                const {tpl}=recEditMdl;
+                const rawA=parseFloat(String(form.amt).replace(",","."));
+                const newTpl={...tpl,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,startDate:tpl.startDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,freq:form.freq||tpl.freq,bday:form.bday||tpl.bday,autoPaid:form.autoPaid||false};
+                // Remove future auto-tx from this date onwards
+                setTx(p=>p.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(tpl.startDate)&&t.auto)));
+                setRec(p=>p.map(r=>r.id===tpl.id?newTpl:r));
+                setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Recorrência atualizada (seguintes) ✓");setForm(mf());nav("home");
+              }} style={{padding:14,background:"#064e3b",border:"1px solid #34d399",borderRadius:11,color:"#34d399",fontWeight:600,fontSize:14,textAlign:"left"}}>
+                🔄 Este e os seguintes
+                <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>Atualiza o modelo. Lançamentos futuros usarão os novos valores.</p>
+              </button>
+              <button onClick={()=>{setRecEditMdl(null);setRecEid(null);setEid(null);}} style={{padding:12,background:"#334155",border:"none",borderRadius:11,color:"#e2e8f0",fontWeight:600,fontSize:14}}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div style={{padding:"calc(14px + env(safe-area-inset-top)) 18px 0",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0f172a",position:"sticky",top:0,zIndex:10}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           {user?.photoURL&&<img src={user.photoURL} style={{width:28,height:28,borderRadius:"50%",flexShrink:0}} alt="" referrerPolicy="no-referrer"/>}
@@ -932,6 +1097,15 @@ export default function App(){
 
             {(bnks.length>0||crds.length>0)&&<AccPicker label="CONTA" atKey="atype" aidKey="aid"/>}
 
+            {/* Payment mode for bank transactions */}
+            {form.atype==="bank"&&!form.inst&&form.freq==="none"&&!recEid&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:12,padding:"11px 14px"}}>
+              <div>
+                <p style={{fontSize:13,fontWeight:600}}>⚡ Débito automático</p>
+                <p style={{fontSize:11,color:"#64748b",marginTop:2}}>{form.autoPaid?"Entra como pago ao salvar":"Entra como pendente até confirmar"}</p>
+              </div>
+              <button className={`tog ${form.autoPaid?"on":"off"}`} onClick={()=>setForm(f=>({...f,autoPaid:!f.autoPaid}))}/>
+            </div>}
+
             {/* Card payDate preview */}
             {form.atype==="card"&&form.date&&!form.inst&&(()=>{
               const card=crds.find(c=>c.id==(parseInt(form.aid)||form.aid));
@@ -1012,7 +1186,7 @@ export default function App(){
         {view==="hist"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:11}}>
           <Hd back={()=>nav("home")} title={`Extrato — ${MS[m]}/${y}`}/>
           {allM.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:"#475569"}}><p style={{fontSize:13}}>Nenhum lançamento este mês</p></div>}
-          {allM.map((t,i)=><TxRow key={t.id||t._fid||i} t={{...t,real:!!t.real}} onE={startE} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover lançamento?",body:"Esta ação não pode ser desfeita.",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
+          {allM.map((t,i)=><TxRow key={t.id||t._fid||i} t={{...t,real:!!t.real}} onE={startE} onFcastE={startFcastE} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover lançamento?",body:"Esta ação não pode ser desfeita.",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
         </div>}
 
         {/* ══ REC ══ */}
