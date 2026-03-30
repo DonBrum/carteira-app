@@ -470,6 +470,23 @@ export default function App(){
     setTx(p=>p.map(t=>t.id===id?{...t,paid:t.paid===false?true:false}:t));
   },[]);
 
+  // ── Installment preview (hook must be before any early return) ──
+  const instPreview=useMemo(()=>{
+    if(!form.inst||!form.tamt||!form.date)return[];
+    const ic=parseInt(form.icount)||2;
+    const amt=parseFloat(String(form.tamt).replace(",","."))||0;
+    const card=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
+    const res=[];
+    for(let i=0;i<ic;i++){
+      const d=pd(form.date);d.setMonth(d.getMonth()+i);
+      const raw=d.toISOString().split("T")[0];
+      const adj=adjBiz(raw,form.bday||"ignore");
+      const pay=card?cardPayDate(adj,card.due):adj;
+      res.push({n:i+1,purchaseDate:adj,payDate:pay,amt:amt/ic});
+    }
+    return res;
+  },[form.inst,form.tamt,form.date,form.icount,form.atype,form.aid,form.bday,crds]);
+
   // ── All hooks before returns ──
   if(user===undefined)return<Loader/>;
   if(!user)return<LoginScreen/>;
@@ -534,22 +551,7 @@ export default function App(){
   const dCard=id=>{setCrds(p=>p.filter(c=>c.id!==id));toast$("Removido","#f97316");};
   const toggleHidden=id=>{setBnks(p=>p.map(b=>b.id===id?{...b,hidden:!b.hidden}:b));};
 
-  // ── Installment preview ──
-  const instPreview=useMemo(()=>{
-    if(!form.inst||!form.tamt||!form.date)return[];
-    const ic=parseInt(form.icount)||2;
-    const amt=parseFloat(String(form.tamt).replace(",","."))||0;
-    const card=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
-    const res=[];
-    for(let i=0;i<ic;i++){
-      const d=pd(form.date);d.setMonth(d.getMonth()+i);
-      const raw=d.toISOString().split("T")[0];
-      const adj=adjBiz(raw,form.bday||"ignore");
-      const pay=card?cardPayDate(adj,card.due):adj;
-      res.push({n:i+1,purchaseDate:adj,payDate:pay,amt:amt/ic});
-    }
-    return res;
-  },[form.inst,form.tamt,form.date,form.icount,form.atype,form.aid,form.bday,crds]);
+
 
   // ── Shared UI ──
   const Hd=({back,title})=>(
