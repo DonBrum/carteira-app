@@ -142,58 +142,6 @@ export default function App(){
     return()=>{document.removeEventListener("visibilitychange",lock);window.removeEventListener("blur",lockBlur);};
   },[savedPin,user]);
 
-  // ── Pull-to-refresh ──
-  useEffect(()=>{
-    const el=mainRef.current;
-    if(!el)return;
-    const onStart=e=>{
-      if(el.scrollTop>0)return; // only trigger when already at top
-      ptrActive.current=true;
-      ptrStartY.current=e.touches[0].clientY;
-    };
-    const onMove=e=>{
-      if(!ptrActive.current)return;
-      const dy=e.touches[0].clientY-ptrStartY.current;
-      if(dy<0){ptrActive.current=false;setPtr(0);return;}
-      e.preventDefault(); // prevent native scroll while pulling
-      setPtr(Math.min(dy,80));
-    };
-    const onEnd=async()=>{
-      if(!ptrActive.current)return;
-      ptrActive.current=false;
-      if(ptr>=60){
-        setPtrSaving(true);
-        await saveNow();
-        // Also re-fetch from server to pull remote changes
-        try{
-          const snap=await getDoc(userDoc(userRef.current?.uid));
-          if(snap.exists()){
-            const d=snap.data();
-            if(d.tx)       setTx(d.tx);
-            if(d.rec)      setRec(d.rec);
-            if(d.inst)     setInst(d.inst);
-            if(d.banks)    setBnks(d.banks);
-            if(d.cards)    setCrds(d.cards);
-            if(d.budg)     setBudg(d.budg);
-            if(d.ccat)     setCcat(d.ccat);
-            if(d.invoices) setInvoices(d.invoices);
-          }
-        }catch(e){console.error("PTR sync:",e);}
-        setTimeout(()=>setPtrSaving(false),1200);
-        toast$("Sincronizado ✓","#34d399");
-      }
-      setPtr(0);
-    };
-    el.addEventListener("touchstart",onStart,{passive:true});
-    el.addEventListener("touchmove",onMove,{passive:false});
-    el.addEventListener("touchend",onEnd);
-    return()=>{
-      el.removeEventListener("touchstart",onStart);
-      el.removeEventListener("touchmove",onMove);
-      el.removeEventListener("touchend",onEnd);
-    };
-  },[ptr,saveNow]);
-
   // ── Refs para ter sempre o valor atual nos saves ──
   const txRef   = useRef(tx);
   const recRef  = useRef(rec);
@@ -253,6 +201,57 @@ export default function App(){
     document.addEventListener("visibilitychange",handleHide);
     return()=>document.removeEventListener("visibilitychange",handleHide);
   },[saveNow]);
+
+  // ── Pull-to-refresh ──
+  useEffect(()=>{
+    const el=mainRef.current;
+    if(!el)return;
+    const onStart=e=>{
+      if(el.scrollTop>0)return;
+      ptrActive.current=true;
+      ptrStartY.current=e.touches[0].clientY;
+    };
+    const onMove=e=>{
+      if(!ptrActive.current)return;
+      const dy=e.touches[0].clientY-ptrStartY.current;
+      if(dy<0){ptrActive.current=false;setPtr(0);return;}
+      e.preventDefault();
+      setPtr(Math.min(dy,80));
+    };
+    const onEnd=async()=>{
+      if(!ptrActive.current)return;
+      ptrActive.current=false;
+      if(ptr>=60){
+        setPtrSaving(true);
+        await saveNow();
+        try{
+          const snap=await getDoc(userDoc(userRef.current?.uid));
+          if(snap.exists()){
+            const d=snap.data();
+            if(d.tx)       setTx(d.tx);
+            if(d.rec)      setRec(d.rec);
+            if(d.inst)     setInst(d.inst);
+            if(d.banks)    setBnks(d.banks);
+            if(d.cards)    setCrds(d.cards);
+            if(d.budg)     setBudg(d.budg);
+            if(d.ccat)     setCcat(d.ccat);
+            if(d.invoices) setInvoices(d.invoices);
+          }
+        }catch(e){console.error("PTR sync:",e);}
+        setTimeout(()=>setPtrSaving(false),1200);
+        toast$("Sincronizado ✓","#34d399");
+      }
+      setPtr(0);
+    };
+    el.addEventListener("touchstart",onStart,{passive:true});
+    el.addEventListener("touchmove",onMove,{passive:false});
+    el.addEventListener("touchend",onEnd);
+    return()=>{
+      el.removeEventListener("touchstart",onStart);
+      el.removeEventListener("touchmove",onMove);
+      el.removeEventListener("touchend",onEnd);
+    };
+  },[ptr,saveNow]);
 
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[tx,user,dataLoaded]);
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[rec,user,dataLoaded]);
