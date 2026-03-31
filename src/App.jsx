@@ -1,238 +1,21 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { auth, db, provider } from "./firebase";
-import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
-import { doc, setDoc, getDoc } from "firebase/firestore";
+import { signOut, onAuthStateChanged } from "firebase/auth";
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
 
-// ── Constants ──────────────────────────────────────────────────────────────────
-const DC={
-  receita:[{id:"salario",l:"Salário",i:"💼"},{id:"freelance",l:"Freelance",i:"💻"},{id:"investimento",l:"Investimento",i:"📈"},{id:"outros_r",l:"Outros",i:"➕"}],
-  despesa:[{id:"moradia",l:"Moradia",i:"🏠"},{id:"alimentacao",l:"Alimentação",i:"🍽️"},{id:"transporte",l:"Transporte",i:"🚗"},{id:"saude",l:"Saúde",i:"❤️"},{id:"lazer",l:"Lazer",i:"🎉"},{id:"educacao",l:"Educação",i:"📚"},{id:"vestuario",l:"Vestuário",i:"👕"},{id:"outros_d",l:"Outros",i:"📦"}]
-};
-const EMOJIS=["🏠","🍽️","🚗","❤️","🎉","📚","👕","📦","💼","💻","📈","➕","🎯","✈️","🐾","🎮","🎵","🌿","☕","🛒","💊","🔧","📱","🎓","🍕","🚀","⭐","🎁","🏦","💰","🪙","🎨","📷","🛋️","🌍","🏋️","🔑","💇","🏖️","🎪"];
-const BCOLS=["#3b82f6","#8b5cf6","#ec4899","#f97316","#10b981","#f59e0b","#06b6d4","#ef4444"];
-const CCOLS=["#1e40af","#6d28d9","#9d174d","#92400e","#065f46","#1e3a5f","#374151","#7f1d1d"];
-const PCOLS=["#38bdf8","#818cf8","#34d399","#f87171","#fbbf24","#a78bfa","#fb923c","#4ade80","#f472b6","#60a5fa"];
-const MS=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
-const BICONS=["🏦","🏧","💰","🪙","🏛️"];
-const CICONS=["💳","🃏","💎","⭐","🔷"];
-const FREQS=[{id:"none",l:"Não repetir"},{id:"weekly",l:"Semanal"},{id:"biweekly",l:"Quinzenal"},{id:"monthly",l:"Mensal"},{id:"bimonthly",l:"Bimestral"},{id:"quarterly",l:"Trimestral"},{id:"semiannual",l:"Semestral"},{id:"annual",l:"Anual"}];
-const HOL=new Set(["01-01","04-21","05-01","09-07","10-12","11-02","11-15","11-20","12-25"]);
+// ── External modules ───────────────────────────────────────────────────────────
+import { DC, EMOJIS, BCOLS, CCOLS, PCOLS, MS, BICONS, CICONS, FREQS, EB, EC } from "./constants";
+import { fmt, td, pd, adjBiz, cardPayDate, autoOccs, recInMonth, instInMonth } from "./utils";
+import { CSS } from "./styles";
+import { Pie, Gauge } from "./components/Charts";
+import { LoginScreen, PinScreen, Loader } from "./components/AuthScreens";
+import { InvPayModal } from "./components/InvPayModal";
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
-const fmt=v=>new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v??0);
-const td=()=>new Date().toISOString().split("T")[0];
-const pd=s=>new Date(s+"T12:00:00");
-const isBiz=d=>{const w=d.getDay();if(w===0||w===6)return false;return!HOL.has(`${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`);};
-const adjBiz=(s,r)=>{if(r==="ignore")return s;let d=pd(s);if(isBiz(d))return s;const st=r==="next"?1:-1;let g=0;while(!isBiz(d)&&g++<15)d.setDate(d.getDate()+st);return d.toISOString().split("T")[0];};
-const addF=(s,f)=>{const d=pd(s);if(f==="weekly")d.setDate(d.getDate()+7);else if(f==="biweekly")d.setDate(d.getDate()+14);else if(f==="monthly")d.setMonth(d.getMonth()+1);else if(f==="bimonthly")d.setMonth(d.getMonth()+2);else if(f==="quarterly")d.setMonth(d.getMonth()+3);else if(f==="semiannual")d.setMonth(d.getMonth()+6);else if(f==="annual")d.setFullYear(d.getFullYear()+1);else return null;return d.toISOString().split("T")[0];};
+// ── Form default & Firestore ───────────────────────────────────────────────────
+const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:"",autoPaid:false});
 
-// ── Card billing cycle ────────────────────────────────────────────────────────
-// closingDay = dia de fechamento da fatura (ex: 10)
-// dueDay     = dia de vencimento (ex: 17)
-// Compra ANTES ou NO dia de fechamento → paga neste ciclo (vence dueDay deste mês)
-// Compra APÓS o fechamento → paga no próximo ciclo (vence dueDay do próximo mês)
-const cardPayDate=(purchaseDate, closingDay, dueDay)=>{
-  const closing=parseInt(closingDay)||10;
-  const due=parseInt(dueDay)||17;
-  const d=pd(purchaseDate);
-  const day=d.getDate();
-  // If purchased on or before closing day → this month's cycle
-  // If purchased after closing day → next month's cycle
-  const addMonth=day>closing?1:0;
-  const targetMonth=d.getMonth()+addMonth;
-  const targetYear=d.getFullYear()+(targetMonth>11?1:0);
-  return new Date(targetYear,targetMonth%12,due).toISOString().split("T")[0];
-};
-
-const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:""});
-const EB={name:"",bal:"",color:BCOLS[0],icon:"🏦",hidden:false};
-const EC={name:"",lim:"",color:CCOLS[0],icon:"💳",closing:"10",due:"17"};
-
-// ── Firestore ──────────────────────────────────────────────────────────────────
 const userDoc=uid=>doc(db,"users",uid);
-const loadUserData=async uid=>{try{const s=await getDoc(userDoc(uid));return s.exists()?s.data():{}}catch{return{}}};
 const saveUserData=async(uid,data)=>{try{await setDoc(userDoc(uid),data,{merge:true})}catch(e){console.error("Firestore save:",e)}};
-
-// ── Charts ─────────────────────────────────────────────────────────────────────
-function Pie({slices,sz=150,label,sub}){
-  if(!slices?.length)return<div style={{width:sz,height:sz,borderRadius:"50%",background:"#1e293b",display:"flex",alignItems:"center",justifyContent:"center"}}><p style={{fontSize:11,color:"#475569"}}>Sem dados</p></div>;
-  const tot=slices.reduce((s,x)=>s+x.v,0);if(!tot)return null;
-  let a=0;
-  const paths=slices.map((sl,i)=>{
-    const sw=sl.v/tot*2*Math.PI,x1=Math.cos(a)*0.85,y1=Math.sin(a)*0.85,x2=Math.cos(a+sw)*0.85,y2=Math.sin(a+sw)*0.85,lg=sw>Math.PI?1:0;
-    const p=<path key={i} d={`M${x1} ${y1}A0.85 0.85 0 ${lg} 1 ${x2} ${y2}L0 0Z`} fill={sl.c} stroke="#0f172a" strokeWidth="0.03"/>;
-    a+=sw;return p;
-  });
-  return(
-    <div style={{position:"relative",width:sz,height:sz,flexShrink:0}}>
-      <svg viewBox="-1 -1 2 2" style={{width:sz,height:sz,transform:"rotate(-90deg)"}}>{paths}</svg>
-      <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-        {label&&<p style={{fontSize:11,fontWeight:700,color:"#e2e8f0",fontFamily:"'DM Mono',monospace",textAlign:"center",lineHeight:1.2,padding:"0 10px"}}>{label}</p>}
-        {sub&&<p style={{fontSize:9,color:"#94a3b8",marginTop:2,textAlign:"center"}}>{sub}</p>}
-      </div>
-    </div>
-  );
-}
-function Gauge({pct=0,label,sub,sz=130}){
-  const cp=Math.min(Math.max(pct,0),1),a=cp*Math.PI,r=0.75;
-  const ex=Math.cos(Math.PI-a)*r,ey=-Math.sin(Math.PI-a)*r;
-  const gc=pct>0.85?"#ef4444":pct>0.6?"#f59e0b":"#34d399";
-  return(
-    <div style={{position:"relative",width:sz,height:sz*0.6,flexShrink:0}}>
-      <svg viewBox="-1.1 -1 2.2 1.1" style={{width:sz,height:sz*0.6}}>
-        <path d={`M${-r} 0A${r} ${r} 0 0 1 ${r} 0`} fill="none" stroke="#1e293b" strokeWidth="0.22" strokeLinecap="round"/>
-        {cp>0.01&&<path d={`M${-r} 0A${r} ${r} 0 ${a>Math.PI/2?1:0} 1 ${ex} ${ey}`} fill="none" stroke={gc} strokeWidth="0.22" strokeLinecap="round"/>}
-      </svg>
-      <div style={{position:"absolute",bottom:0,left:0,right:0,textAlign:"center"}}>
-        {label&&<p style={{fontSize:13,fontWeight:700,color:gc,fontFamily:"'DM Mono',monospace"}}>{label}</p>}
-        {sub&&<p style={{fontSize:9,color:"#64748b",marginTop:1}}>{sub}</p>}
-      </div>
-    </div>
-  );
-}
-
-// ── PIN Screen ─────────────────────────────────────────────────────────────────
-function PinScreen({savedPin,onUnlock}){
-  const [input,setInput]=useState("");
-  const [error,setError]=useState(false);
-  const [confirm,setConfirm]=useState("");
-  const [step,setStep]=useState(1);
-  const isSetup=!savedPin;
-  const press=useCallback(val=>{
-    if(val==="del"){setInput(p=>p.slice(0,-1));setError(false);return;}
-    if(input.length>=6)return;
-    setInput(p=>p+val);
-  },[input]);
-  useEffect(()=>{
-    if(isSetup||input.length!==4)return;
-    if(input===savedPin)onUnlock();
-    else{setError(true);setTimeout(()=>{setInput("");setError(false);},600);}
-  },[input,isSetup,savedPin,onUnlock]);
-  const handleConfirm=useCallback(()=>{
-    if(step===1){if(input.length<4)return;setConfirm(input);setInput("");setStep(2);}
-    else{if(input===confirm)onUnlock(input);else{setError(true);setTimeout(()=>{setInput("");setError(false);setStep(1);setConfirm("");},600);}}
-  },[step,input,confirm,onUnlock]);
-  const title=isSetup?(step===1?"🔐 Criar PIN":"🔐 Confirme o PIN"):"🔒 Digite seu PIN";
-  return(
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100dvh",background:"#0f172a",padding:"env(safe-area-inset-top) 20px env(safe-area-inset-bottom)"}}>
-      <div style={{background:"#1e293b",borderRadius:24,padding:"32px 24px",width:"100%",maxWidth:340,display:"flex",flexDirection:"column",alignItems:"center",gap:20}}>
-        <div style={{textAlign:"center"}}>
-          <h2 style={{fontSize:19,fontWeight:700,color:"#e2e8f0",marginBottom:6}}>{title}</h2>
-          <p style={{fontSize:13,color:"#64748b"}}>{isSetup?(step===1?"PIN de 4 a 6 dígitos":"Digite novamente para confirmar"):"Seu app está protegido"}</p>
-        </div>
-        <div style={{display:"flex",gap:14,padding:"4px 0"}}>
-          {Array.from({length:Math.max(input.length,4)}).map((_,i)=>(
-            <div key={i} style={{width:14,height:14,borderRadius:"50%",background:error?"#ef4444":i<input.length?"#38bdf8":"#334155",transition:"background .18s"}}/>
-          ))}
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,width:"100%"}}>
-          {["1","2","3","4","5","6","7","8","9","del","0"].map(k=>(
-            <button key={k} onClick={()=>press(k)} style={{background:"#0f172a",border:"1.5px solid #334155",borderRadius:14,padding:"18px 0",fontSize:k==="del"?18:22,fontWeight:700,color:k==="del"?"#94a3b8":"#e2e8f0",WebkitTapHighlightColor:"transparent"}}>
-              {k==="del"?"⌫":k}
-            </button>
-          ))}
-          {isSetup?<button disabled={input.length<4} onClick={handleConfirm} style={{background:input.length<4?"#334155":"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",borderRadius:14,padding:"18px 0",fontSize:13,fontWeight:700,color:"#fff",WebkitTapHighlightColor:"transparent",opacity:input.length<4?0.5:1}}>{step===1?"Próximo":"✓ Salvar"}</button>:<div/>}
-        </div>
-        {error&&<p style={{fontSize:12,color:"#f87171",fontWeight:600}}>{isSetup?"PINs não coincidem":"PIN incorreto"}</p>}
-      </div>
-    </div>
-  );
-}
-
-// ── Login Screen ───────────────────────────────────────────────────────────────
-function LoginScreen(){
-  const [loading,setLoading]=useState(false);
-  const [error,setError]=useState("");
-  const handleGoogle=async()=>{
-    setLoading(true);setError("");
-    try{await signInWithPopup(auth,provider);}
-    catch(e){setError(e.code==="auth/popup-closed-by-user"?"Login cancelado.":"Erro ao entrar. Tente novamente.");setLoading(false);}
-  };
-  return(
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100dvh",background:"#0f172a",padding:"env(safe-area-inset-top) 20px env(safe-area-inset-bottom)"}}>
-      <div style={{background:"#1e293b",borderRadius:24,padding:"40px 28px",width:"100%",maxWidth:340,display:"flex",flexDirection:"column",alignItems:"center",gap:22,textAlign:"center"}}>
-        <div style={{width:72,height:72,borderRadius:20,background:"linear-gradient(135deg,#1e3a5f,#1e293b)",border:"1px solid #2d4a6b",display:"flex",alignItems:"center",justifyContent:"center",fontSize:36}}>💰</div>
-        <div>
-          <h1 style={{fontSize:24,fontWeight:700,color:"#e2e8f0",marginBottom:8}}>Minha Carteira</h1>
-          <p style={{fontSize:13,color:"#64748b",lineHeight:1.6}}>Dados sincronizados em todos os dispositivos em tempo real.</p>
-        </div>
-        <button onClick={handleGoogle} disabled={loading} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,background:"#fff",border:"none",borderRadius:14,padding:"14px 24px",fontSize:15,fontWeight:600,color:"#1e293b",width:"100%",opacity:loading?0.7:1,WebkitTapHighlightColor:"transparent",transition:"opacity .2s"}}>
-          <svg width="20" height="20" viewBox="0 0 48 48">
-            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.35-8.16 2.35-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-          </svg>
-          {loading?"Entrando…":"Entrar com Google"}
-        </button>
-        {error&&<p style={{fontSize:12,color:"#f87171"}}>{error}</p>}
-        <p style={{fontSize:11,color:"#475569"}}>Cada conta Google tem seus dados separados e seguros.</p>
-      </div>
-    </div>
-  );
-}
-function Loader({icon="💰",msg="Carregando…"}){
-  return<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100dvh",background:"#0f172a",gap:14}}><p style={{fontSize:40}}>{icon}</p><p style={{fontSize:13,color:"#64748b",fontWeight:500}}>{msg}</p></div>;
-}
-
-// ── Recurring helpers ──────────────────────────────────────────────────────────
-function autoOccs(tpl,done){
-  const now=new Date();const res=[];let cur=tpl.startDate;let g=0;
-  while(g++<600){const adj=adjBiz(cur,tpl.bday||"ignore");const d=pd(adj);if(d>now)break;
-    const key=`${tpl.id}__${cur}`;if(!done.has(key))res.push({key,date:adj,orig:cur});
-    const nx=addF(cur,tpl.freq);if(!nx||nx===cur)break;cur=nx;}
-  return res;
-}
-function recInMonth(tpl,m,y){
-  const ms=new Date(y,m,1),me=new Date(y,m+1,0);const res=[];let cur=tpl.startDate;let g=0;
-  while(g++<600){const adj=adjBiz(cur,tpl.bday||"ignore");const d=pd(adj);if(d>me)break;
-    if(d>=ms)res.push({date:adj,orig:cur});const nx=addF(cur,tpl.freq);if(!nx||nx===cur)break;cur=nx;}
-  return res;
-}
-function instInMonth(ins,m,y){
-  const res=[];
-  for(let i=0;i<ins.icount;i++){const d=pd(ins.startDate);d.setMonth(d.getMonth()+i);const raw=d.toISOString().split("T")[0];const adj=adjBiz(raw,ins.bday||"ignore");const dd=pd(adj);
-    if(dd.getMonth()===m&&dd.getFullYear()===y)res.push({date:adj,orig:raw,idx:i+1,amt:ins.tamt/ins.icount});}
-  return res;
-}
-
-// ── CSS ────────────────────────────────────────────────────────────────────────
-const CSS=`
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{background:#0f172a;overscroll-behavior-y:none}
-input,select,textarea{font-family:inherit;outline:none;color:#e2e8f0;font-size:16px;-webkit-appearance:none;appearance:none}
-button{cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
-::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#1e293b}::-webkit-scrollbar-thumb{background:#334155;border-radius:4px}
-.si{animation:si .22s ease}@keyframes si{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-.card{background:#1e293b;border-radius:14px;padding:14px}
-.fi{background:#0f172a;border:1.5px solid #334155;border-radius:11px;padding:11px 14px;font-size:16px;width:100%;transition:border-color .2s;color:#e2e8f0}
-.fi:focus{border-color:#38bdf8}
-.seg{display:flex;background:#0f172a;border-radius:10px;padding:3px;gap:3px}
-.st{flex:1;padding:8px 4px;border:none;border-radius:8px;font-size:11px;font-weight:600;transition:all .18s;background:transparent;color:#64748b;white-space:nowrap;touch-action:manipulation}
-.st.on{background:#1e293b;color:#e2e8f0}
-.tb{flex:1;padding:10px;border:none;border-radius:9px;font-size:14px;font-weight:600;transition:all .18s;touch-action:manipulation}
-.tb.r.on{background:#064e3b;color:#34d399}.tb.d.on{background:#450a0a;color:#f87171}.tb:not(.on){background:transparent;color:#64748b}
-.cg{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
-.cb{background:#0f172a;border:1.5px solid #334155;border-radius:10px;padding:9px 3px;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px;color:#94a3b8;transition:all .18s;touch-action:manipulation}
-.cb.on{border-color:#38bdf8;color:#38bdf8;background:#0c1e2e}
-.pb{height:5px;background:#0f172a;border-radius:99px;overflow:hidden}.pf{height:100%;border-radius:99px;transition:width .45s ease}
-.nb{background:none;border:none;color:#64748b;font-size:9px;font-weight:500;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 4px;transition:color .18s;flex:1;touch-action:manipulation;min-height:44px;justify-content:center}
-.nb.on{color:#38bdf8}.nb svg{width:20px;height:20px}
-.ab{padding:7px 11px;border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;touch-action:manipulation;min-height:32px}
-.cdot{width:22px;height:22px;border-radius:50%;border:2.5px solid transparent;cursor:pointer;flex-shrink:0;transition:transform .15s}
-.cdot.on{border-color:#fff;transform:scale(1.25)}
-.bdg{display:inline-flex;align-items:center;padding:2px 6px;border-radius:99px;font-size:9px;font-weight:700}
-.tog{width:42px;height:24px;border-radius:99px;border:none;position:relative;transition:background .2s;cursor:pointer;flex-shrink:0;touch-action:manipulation}
-.tog::after{content:'';position:absolute;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s}
-.tog.on{background:#38bdf8}.tog.off{background:#334155}
-.tog.on::after{left:21px}.tog.off::after{left:3px}
-.vc{border-radius:18px;padding:18px;position:relative;overflow:hidden}
-.fc{border-left:3px solid #7dd3fc;opacity:.75}
-.unpaid-row{opacity:.65;border-left:3px solid #f59e0b}
-.overdue-row{opacity:.8;border-left:3px solid #ef4444}
-select.fi{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;padding-right:36px}
-select option{background:#1e293b;color:#e2e8f0}
-`;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App(){
@@ -250,6 +33,8 @@ export default function App(){
   const [crds, setCrds]= useState([]);
   const [budg, setBudg]= useState({});
   const [ccat, setCcat]= useState({receita:[],despesa:[]});
+  // invoices: { "cardId_YYYY_MM": { status:"open"|"closed"|"paid", paidDate, bankId, txIds } }
+  const [invoices, setInvoices]= useState({});
 
   // ── UI ──
   const [view, setView]= useState("home");
@@ -265,37 +50,69 @@ export default function App(){
   const [atab, setAtab]= useState("banks");
   const [bi,   setBi]  = useState({});
   const [selC, setSelC]= useState(null);
+  const [selB, setSelB]= useState(null);
   const [mdl,  setMdl] = useState(null);
   const [tst,  setTst] = useState(null);
   const [rtab, setRtab]= useState("rec");
   const [epk,  setEpk] = useState(false);
   const [recEditMdl, setRecEditMdl]= useState(null); // {rec, form} for "só este / seguintes" modal
+  const [invPayMdl,  setInvPayMdl] = useState(null); // {card, month, year, total} for invoice payment
   const saveTimer      = useRef(null);
   const mainRef        = useRef(null);
 
   const nav=useCallback(v=>{setView(v);setTimeout(()=>mainRef.current?.scrollTo({top:0,behavior:"instant"}),0);},[]);
 
-  // ── Auth listener ──
+  // ── Auth + real-time Firestore listener ──
   useEffect(()=>{
-    const unsub=onAuthStateChanged(auth,async u=>{
+    // Ref to store the Firestore unsubscribe so we can clean it up on logout
+    let unsubFirestore=null;
+
+    const unsubAuth=onAuthStateChanged(auth,u=>{
       setUser(u);
+
+      // Clean up any previous Firestore listener before setting a new one
+      if(unsubFirestore){unsubFirestore();unsubFirestore=null;}
+
       if(u){
-        const data=await loadUserData(u.uid);
-        if(data.tx)    setTx(data.tx);
-        if(data.rec)   setRec(data.rec);
-        if(data.inst)  setInst(data.inst);
-        if(data.banks) setBnks(data.banks);
-        if(data.cards) setCrds(data.cards);
-        if(data.budg)  setBudg(data.budg);
-        if(data.ccat)  setCcat(data.ccat);
-        if(data.pin)   setSavedPin(data.pin);
-        setDataLoaded(true);setLocked(true);
+        // onSnapshot fires immediately with current data, then on every remote change
+        unsubFirestore=onSnapshot(
+          userDoc(u.uid),
+          snapshot=>{
+            // hasPendingWrites = true  → change came from THIS device (we wrote it)
+            // hasPendingWrites = false → change came from the SERVER (another device)
+            // Only apply when coming from server to avoid overwriting local state mid-edit
+            if(snapshot.metadata.hasPendingWrites) return;
+
+            const data=snapshot.exists()?snapshot.data():{};
+            if(data.tx)       setTx(data.tx);
+            if(data.rec)      setRec(data.rec);
+            if(data.inst)     setInst(data.inst);
+            if(data.banks)    setBnks(data.banks);
+            if(data.cards)    setCrds(data.cards);
+            if(data.budg)     setBudg(data.budg);
+            if(data.ccat)     setCcat(data.ccat);
+            if(data.invoices) setInvoices(data.invoices);
+            if(data.pin)      setSavedPin(data.pin);
+            // First load: mark data as ready and require PIN unlock
+            // Subsequent syncs: just update data silently, don't re-lock
+            setDataLoaded(prev=>{
+              if(!prev) setLocked(true); // first load → require PIN
+              return true;
+            });
+          },
+          err=>{console.error("Firestore listener:",err);}
+        );
       } else {
         setTx([]);setRec([]);setInst([]);setBnks([]);setCrds([]);setBudg({});
-        setCcat({receita:[],despesa:[]});setSavedPin("");setDataLoaded(false);setLocked(true);
+        setCcat({receita:[],despesa:[]});setInvoices({});setSavedPin("");
+        setDataLoaded(false);setLocked(true);
       }
     });
-    return unsub;
+
+    return()=>{
+      unsubAuth();
+      if(unsubFirestore)unsubFirestore();
+    };
   },[]);
 
   // ── Lock on hide ──
@@ -316,6 +133,7 @@ export default function App(){
   const crdsRef = useRef(crds);
   const budgRef = useRef(budg);
   const ccatRef = useRef(ccat);
+  const invRef  = useRef(invoices);
   useEffect(()=>{txRef.current=tx;},[tx]);
   useEffect(()=>{recRef.current=rec;},[rec]);
   useEffect(()=>{instRef.current=inst;},[inst]);
@@ -323,6 +141,7 @@ export default function App(){
   useEffect(()=>{crdsRef.current=crds;},[crds]);
   useEffect(()=>{budgRef.current=budg;},[budg]);
   useEffect(()=>{ccatRef.current=ccat;},[ccat]);
+  useEffect(()=>{invRef.current=invoices;},[invoices]);
 
   // ── Debounced Firestore save — salva TUDO de uma vez ──
   const saveToFirestore=useCallback(()=>{
@@ -330,13 +149,14 @@ export default function App(){
     if(saveTimer.current)clearTimeout(saveTimer.current);
     saveTimer.current=setTimeout(()=>{
       saveUserData(user.uid,{
-        tx:    txRef.current,
-        rec:   recRef.current,
-        inst:  instRef.current,
-        banks: bnksRef.current,
-        cards: crdsRef.current,
-        budg:  budgRef.current,
-        ccat:  ccatRef.current,
+        tx:       txRef.current,
+        rec:      recRef.current,
+        inst:     instRef.current,
+        banks:    bnksRef.current,
+        cards:    crdsRef.current,
+        budg:     budgRef.current,
+        ccat:     ccatRef.current,
+        invoices: invRef.current,
       });
     },800);
   },[user]);
@@ -348,6 +168,7 @@ export default function App(){
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[crds,user,dataLoaded]);
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[budg,user,dataLoaded]);
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[ccat,user,dataLoaded]);
+  useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[invoices,user,dataLoaded]);
 
   // ── Merged categories ──
   const cats=useMemo(()=>({
@@ -452,6 +273,12 @@ export default function App(){
   // bbal: only paid bank transactions (hidden accounts still tracked separately)
   const bbal=useCallback(b=>{
     const s=tx.filter(t=>t.atype==="bank"&&t.aid===b.id&&t.paid!==false).reduce((s,t)=>s+(t.type==="receita"?t.amt:-t.amt),0);
+    return(parseFloat(b.bal)||0)+s;
+  },[tx]);
+
+  // bbalUntil: balance up to (not including) a specific date — used for month opening balance
+  const bbalUntil=useCallback((b,untilDate)=>{
+    const s=tx.filter(t=>t.atype==="bank"&&t.aid===b.id&&t.paid!==false&&pd(t.date)<untilDate).reduce((s,t)=>s+(t.type==="receita"?t.amt:-t.amt),0);
     return(parseFloat(b.bal)||0)+s;
   },[tx]);
 
@@ -597,10 +424,10 @@ export default function App(){
     const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
     const payDate=cardObj?cardPayDate(adjD,cardObj.closing,cardObj.due):undefined;
     if(eid){
-      setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid}:t));
+      setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t));
       setEid(null);toast$("Atualizado ✓");
     } else {
-      const isPaidNow=form.atype==="card"?false:(form.autoPaid!==false); // card purchases always start as unpaid-tracking; bank defaults to paid unless toggled off
+      const isPaidNow=form.atype==="card"?false:!!form.autoPaid;
       setTx(p=>[{id:Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,paid:isPaidNow},...p]);
       toast$(form.type==="receita"?"Receita adicionada ✓":"Despesa adicionada ✓");
     }
@@ -608,8 +435,47 @@ export default function App(){
   };
 
   const startE=t=>{
+    // If this tx was generated by a recurring template, route through the
+    // "só este / este e seguintes" modal so the user can choose scope.
+    if(t.rid){
+      const tpl=rec.find(r=>r.id===t.rid);
+      if(tpl){
+        setEid(t.id);   // so the modal knows which specific tx to patch
+        setRecEid(tpl.id);
+        setForm({
+          ...mf(),
+          type:      t.type,
+          amt:       String(t.amt),
+          desc:      t.desc,
+          cat:       t.cat,
+          date:      t.date,
+          note:      t.note||"",
+          atype:     t.atype||"bank",
+          aid:       t.aid||"",
+          bday:      t.bday||tpl.bday||"ignore",
+          freq:      tpl.freq||"monthly",
+          autoPaid:  tpl.autoPaid||false,
+          _editPaid: t.paid,
+        });
+        nav("add");
+        return;
+      }
+    }
+    // Regular (non-recurring) transaction — edit directly
     setEid(t.id);
-    setForm({...mf(),type:t.type,amt:String(t.amt),desc:t.desc,cat:t.cat,date:t.date,note:t.note||"",atype:t.atype||"bank",aid:t.aid||""});
+    setForm({
+      ...mf(),
+      type:      t.type,
+      amt:       String(t.amt),
+      desc:      t.desc,
+      cat:       t.cat,
+      date:      t.date,
+      note:      t.note||"",
+      atype:     t.atype||"bank",
+      aid:       t.aid||"",
+      bday:      t.bday||"ignore",
+      _editPaid: t.paid,
+    });
     nav("add");
   };
 
@@ -645,6 +511,48 @@ export default function App(){
   const dBank=id=>{setBnks(p=>p.filter(b=>b.id!==id));toast$("Removido","#f97316");};
   const dCard=id=>{setCrds(p=>p.filter(c=>c.id!==id));toast$("Removido","#f97316");};
   const toggleHidden=id=>{setBnks(p=>p.map(b=>b.id===id?{...b,hidden:!b.hidden}:b));};
+
+  // ── Invoice helpers ──
+  const invKey=(cardId,month,year)=>`${cardId}_${year}_${String(month).padStart(2,"0")}`;
+
+  // Returns the status of a card invoice for a given month/year
+  // "paid" | "closed" (past closing day, unpaid) | "open" (current cycle)
+  const invStatus=(card,month,year)=>{
+    const key=invKey(card.id,month,year);
+    if(invoices[key]?.status==="paid") return "paid";
+    const today=new Date();
+    const closing=parseInt(card.closing)||10;
+    // Closing date for this cycle
+    const closeDate=new Date(year,month,closing);
+    if(today>closeDate) return "closed";
+    return "open";
+  };
+
+  // Pay invoice: debit from bank, mark fatura as paid
+  const payInvoice=(card,month,year,total,bankId,payDate)=>{
+    const key=invKey(card.id,month,year);
+    const tid=Date.now();
+    const bankName=bnks.find(b=>b.id===bankId)?.name||"conta";
+    // Debit from bank account
+    const debit={id:tid,type:"despesa",amt:total,
+      desc:`💳 Fatura ${card.name} ${MS[month]}/${year}`,
+      cat:"fatura",date:payDate,note:"",
+      atype:"bank",aid:bankId,
+      isInvoicePay:true,cardId:card.id,invMonth:month,invYear:year,
+      paid:true};
+    // Credit on card (zeroes the fatura visually)
+    const credit={id:tid+1,type:"receita",amt:total,
+      desc:`✅ Pgto fatura ${MS[month]}/${year} — ${bankName}`,
+      cat:"fatura",date:payDate,
+      payDate:new Date(year,month,parseInt(card.due)||17).toISOString().split("T")[0],
+      note:"",atype:"card",aid:card.id,
+      isInvoiceCredit:true,cardId:card.id,invMonth:month,invYear:year,
+      paid:true};
+    setTx(p=>[debit,credit,...p]);
+    setInvoices(p=>({...p,[key]:{status:"paid",paidDate:payDate,bankId,txIds:[tid,tid+1]}}));
+    toast$("Fatura paga ✓ 🎉");
+    setInvPayMdl(null);
+  };
 
   // ── Recurring edit handlers ──
   // "Só este e seguintes" — update template startDate + amt/desc from the chosen date
@@ -754,17 +662,10 @@ export default function App(){
           {!t.real&&onFcastE&&(t.isRF)&&(
             <button onClick={()=>onFcastE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>
           )}
-          {/* Edit/delete for real non-auto tx */}
-          {t.real&&!t.auto&&!isTr&&(
+          {/* Edit/delete for ALL real non-transfer transactions */}
+          {t.real&&!isTr&&(
             <div style={{display:"flex",gap:5}}>
               {onE&&<button onClick={()=>onE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>}
-              <button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>
-            </div>
-          )}
-          {/* Edit/delete for real auto tx (pending ones can be edited) */}
-          {t.real&&t.auto&&!isTr&&(
-            <div style={{display:"flex",gap:5}}>
-              {!isPaid&&onE&&<button onClick={()=>onE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>}
               <button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>
             </div>
           )}
@@ -827,18 +728,20 @@ export default function App(){
             <p style={{fontSize:12,color:"#94a3b8",marginBottom:20,lineHeight:1.6}}>Deseja aplicar as alterações apenas a este mês, ou a partir deste mês em diante?</p>
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
               <button onClick={()=>{
-                // "Somente este" — update only the existing materialised tx if it exists, otherwise create it
+                // "Somente este" — patch only this specific tx, keep template untouched
                 const {tpl}=recEditMdl;
                 const rawA=parseFloat(String(form.amt).replace(",","."));
+                const txDate=form.date||tpl.startDate;
+                const adjD=adjBiz(txDate,form.bday||"ignore");
                 const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
-                const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.closing,cardObj.due):undefined;
+                const payDate=cardObj?cardPayDate(adjD,cardObj.closing,cardObj.due):undefined;
                 if(eid){
-                  setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,payDate}:t));
+                  setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t));
                 } else {
-                  // Materialise as override
-                  const key=`${tpl.id}__${tpl.startDate}`;
-                  const newId=`r_${tpl.id}_${tpl.startDate}`;
-                  setTx(p=>{const ex=new Set(p.map(t=>t.id));return ex.has(newId)?p:[{id:newId,rk:key,rid:tpl.id,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:tpl.startDate,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,auto:true,paid:false},...p];});
+                  // Materialise as a one-off override
+                  const key=`${tpl.id}__${txDate}`;
+                  const newId=`r_${tpl.id}_${txDate}`;
+                  setTx(p=>{const ex=new Set(p.map(t=>t.id));return ex.has(newId)?p:[{id:newId,rk:key,rid:tpl.id,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,auto:true,paid:false},...p];});
                 }
                 setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Este lançamento atualizado ✓");setForm(mf());nav("home");
               }} style={{padding:14,background:"#1e3a5f",border:"1px solid #38bdf8",borderRadius:11,color:"#38bdf8",fontWeight:600,fontSize:14,textAlign:"left"}}>
@@ -846,12 +749,13 @@ export default function App(){
                 <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>Altera apenas este mês. Os demais continuam iguais.</p>
               </button>
               <button onClick={()=>{
-                // "Este e seguintes" — update template from this date onwards
+                // "Este e seguintes" — update template from the tx date onwards
                 const {tpl}=recEditMdl;
                 const rawA=parseFloat(String(form.amt).replace(",","."));
-                const newTpl={...tpl,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,startDate:tpl.startDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,freq:form.freq||tpl.freq,bday:form.bday||tpl.bday,autoPaid:form.autoPaid||false};
-                // Remove future auto-tx from this date onwards
-                setTx(p=>p.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(tpl.startDate)&&t.auto)));
+                const fromDate=form.date||tpl.startDate;
+                const newTpl={...tpl,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,startDate:fromDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,freq:form.freq||tpl.freq,bday:form.bday||tpl.bday,autoPaid:form.autoPaid||false};
+                // Remove auto-generated tx from this date onwards so they regenerate with new values
+                setTx(p=>p.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(fromDate)&&t.auto)));
                 setRec(p=>p.map(r=>r.id===tpl.id?newTpl:r));
                 setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Recorrência atualizada (seguintes) ✓");setForm(mf());nav("home");
               }} style={{padding:14,background:"#064e3b",border:"1px solid #34d399",borderRadius:11,color:"#34d399",fontWeight:600,fontSize:14,textAlign:"left"}}>
@@ -865,6 +769,22 @@ export default function App(){
           </div>
         </div>
       )}
+
+      {/* ── Invoice Payment Modal ── */}
+      {invPayMdl&&<InvPayModal
+        invPayMdl={invPayMdl}
+        bnks={bnks}
+        bbal={bbal}
+        fmt={fmt}
+        MS={MS}
+        td={td}
+        onCancel={()=>setInvPayMdl(null)}
+        onConfirm={(bankId,payD)=>{
+          if(!bankId){toast$("Selecione a conta","#ef4444");return;}
+          payInvoice(invPayMdl.card,invPayMdl.month,invPayMdl.year,invPayMdl.total,bankId,payD);
+        }}
+      />}
+
       <div style={{padding:"calc(14px + env(safe-area-inset-top)) 18px 0",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0f172a",position:"sticky",top:0,zIndex:10}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           {user?.photoURL&&<img src={user.photoURL} style={{width:28,height:28,borderRadius:"50%",flexShrink:0}} alt="" referrerPolicy="no-referrer"/>}
@@ -910,7 +830,7 @@ export default function App(){
             </div>
             <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:4,scrollbarWidth:"none"}}>
               {bnks.map(b=>{const bal=bbal(b);return(
-                <div key={b.id} style={{background:b.hidden?"#1e293b":b.color+"22",border:`1px solid ${b.hidden?"#334155":b.color+"44"}`,borderRadius:14,padding:"11px 14px",minWidth:140,flexShrink:0,opacity:b.hidden?0.5:1}}>
+                <div key={b.id} onClick={()=>{setSelB(b);nav("bank");}} style={{background:b.hidden?"#1e293b":b.color+"22",border:`1px solid ${b.hidden?"#334155":b.color+"44"}`,borderRadius:14,padding:"11px 14px",minWidth:140,flexShrink:0,opacity:b.hidden?0.5:1,cursor:"pointer"}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <p style={{fontSize:18}}>{b.icon}</p>
                     {b.hidden&&<span style={{fontSize:9,color:"#64748b"}}>oculta</span>}
@@ -1141,13 +1061,15 @@ export default function App(){
 
             {(bnks.length>0||crds.length>0)&&<AccPicker label="CONTA" atKey="atype" aidKey="aid"/>}
 
-            {/* Payment mode for bank transactions */}
-            {form.atype==="bank"&&!form.inst&&form.freq==="none"&&!recEid&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:12,padding:"11px 14px"}}>
+            {/* Paid status for bank transactions — shown on new entries and edits */}
+            {form.atype==="bank"&&!form.inst&&form.freq==="none"&&!recEid&&<div
+              onClick={()=>setForm(f=>({...f,autoPaid:!f.autoPaid}))}
+              style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:12,padding:"11px 14px",cursor:"pointer"}}>
               <div>
-                <p style={{fontSize:13,fontWeight:600}}>⚡ Débito automático</p>
-                <p style={{fontSize:11,color:"#64748b",marginTop:2}}>{form.autoPaid?"Entra como pago ao salvar":"Entra como pendente até confirmar"}</p>
+                <p style={{fontSize:13,fontWeight:600}}>{form.autoPaid?"✅ Já foi pago / debitado":"⏳ Ainda não foi pago"}</p>
+                <p style={{fontSize:11,color:"#64748b",marginTop:2}}>{form.autoPaid?"Saldo atualizado imediatamente":"Fica pendente até você confirmar"}</p>
               </div>
-              <button className={`tog ${form.autoPaid?"on":"off"}`} onClick={()=>setForm(f=>({...f,autoPaid:!f.autoPaid}))}/>
+              <button className={`tog ${form.autoPaid?"on":"off"}`} onClick={e=>{e.stopPropagation();setForm(f=>({...f,autoPaid:!f.autoPaid}));}}/>
             </div>}
 
             {/* Card payDate preview */}
@@ -1187,13 +1109,15 @@ export default function App(){
               </select>
             </div>}
 
-            {/* autoPaid toggle for recurring */}
-            {(form.freq!=="none"||recEid)&&!eid&&<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:12,padding:"11px 14px"}}>
+            {/* Débito automático toggle — only for recurring templates */}
+            {(form.freq!=="none"||recEid)&&!eid&&<div
+              onClick={()=>setForm(f=>({...f,autoPaid:!f.autoPaid}))}
+              style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:12,padding:"11px 14px",cursor:"pointer"}}>
               <div>
-                <p style={{fontSize:13,fontWeight:600}}>✅ Confirmar automaticamente</p>
-                <p style={{fontSize:11,color:"#64748b",marginTop:2}}>Se ativo, lançamentos já entram como pagos</p>
+                <p style={{fontSize:13,fontWeight:600}}>📅 Débito automático</p>
+                <p style={{fontSize:11,color:"#64748b",marginTop:2}}>{form.autoPaid?"Entra como pago automaticamente na data":"Fica pendente — você confirma manualmente"}</p>
               </div>
-              <button className={`tog ${form.autoPaid?"on":"off"}`} onClick={()=>setForm(f=>({...f,autoPaid:!f.autoPaid}))}/>
+              <button className={`tog ${form.autoPaid?"on":"off"}`} onClick={e=>{e.stopPropagation();setForm(f=>({...f,autoPaid:!f.autoPaid}));}}/>
             </div>}
 
             <BdayRow/>
@@ -1250,8 +1174,8 @@ export default function App(){
                   <p style={{fontSize:10,color:"#64748b"}}>{freq?.l} · desde {pd(r.startDate).toLocaleDateString("pt-BR")}</p>
                   <div style={{display:"flex",gap:5,marginTop:2,flexWrap:"wrap"}}>
                     <span className="bdg" style={{background:"#0f172a",color:"#64748b"}}>{cnt} gerado{cnt!==1?"s":""}</span>
-                    {r.autoPaid&&<span className="bdg" style={{background:"#064e3b",color:"#34d399"}}>auto-pago</span>}
-                    {!r.autoPaid&&<span className="bdg" style={{background:"#451a03",color:"#f59e0b"}}>manual</span>}
+                    {r.autoPaid&&<span className="bdg" style={{background:"#064e3b",color:"#34d399"}}>📅 débito auto</span>}
+                    {!r.autoPaid&&<span className="bdg" style={{background:"#451a03",color:"#f59e0b"}}>✋ manual</span>}
                   </div>
                 </div>
                 <div style={{textAlign:"right",display:"flex",flexDirection:"column",gap:5,alignItems:"flex-end"}}>
@@ -1442,22 +1366,41 @@ export default function App(){
         {/* ══ CARD DETAIL ══ */}
         {view==="card"&&selC&&(()=>{
           const sp=csp(selC.id),lim=parseFloat(selC.lim)||0,av=lim>0?lim-sp:null,pct=lim>0?Math.min((sp/lim)*100,100):0;
-          const cItems=allM.filter(i=>i.atype==="card"&&i.aid===selC.id);
+          const cItems=allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit);
           const cInst=inst.filter(i=>i.atype==="card"&&i.aid===selC.id);
+          const iStat=invStatus(selC,m,y);
+          const isPaid=iStat==="paid";
+          const isClosed=iStat==="closed";
+          const invData=invoices[invKey(selC.id,m,y)];
           return<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:12}}>
             <Hd back={()=>nav("home")} title={`Fatura — ${selC.name}`}/>
             <div className="vc" style={{background:`linear-gradient(135deg,${selC.color},${selC.color}88)`}}>
               <div style={{position:"absolute",top:-18,right:-18,width:90,height:90,borderRadius:"50%",background:"rgba(255,255,255,.06)"}}/>
-              <p style={{fontSize:22}}>{selC.icon}</p>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <p style={{fontSize:22}}>{selC.icon}</p>
+                {/* Invoice status badge */}
+                {isPaid&&<span style={{background:"rgba(52,211,153,.2)",border:"1px solid #34d399",borderRadius:99,padding:"3px 10px",fontSize:11,fontWeight:700,color:"#34d399"}}>✓ Paga</span>}
+                {isClosed&&!isPaid&&<span style={{background:"rgba(245,158,11,.2)",border:"1px solid #f59e0b",borderRadius:99,padding:"3px 10px",fontSize:11,fontWeight:700,color:"#f59e0b"}}>⚠ Aguardando pagamento</span>}
+                {!isClosed&&!isPaid&&<span style={{background:"rgba(56,189,248,.15)",border:"1px solid #38bdf8",borderRadius:99,padding:"3px 10px",fontSize:11,fontWeight:700,color:"#38bdf8"}}>Em aberto</span>}
+              </div>
               <p style={{fontSize:16,fontWeight:700,color:"#fff",marginTop:7}}>{selC.name}</p>
               <div style={{display:"flex",gap:20,marginTop:9}}>
-                <div><p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>FATURA {MS[m].toUpperCase()}</p><p style={{fontSize:22,fontWeight:700,color:"#fff",fontFamily:"'DM Mono',monospace"}}>{fmt(sp)}</p></div>
+                <div><p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>FATURA {MS[m].toUpperCase()}</p><p style={{fontSize:22,fontWeight:700,color:isPaid?"#a7f3d0":"#fff",fontFamily:"'DM Mono',monospace"}}>{fmt(sp)}</p></div>
                 {lim>0&&<><div style={{width:1,background:"rgba(255,255,255,.2)"}}/>
                 <div><p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>DISPONÍVEL</p><p style={{fontSize:14,fontWeight:700,color:av>=0?"#a7f3d0":"#fca5a5",fontFamily:"'DM Mono',monospace",marginTop:6}}>{fmt(av)}</p></div></>}
               </div>
               {lim>0&&<div style={{marginTop:10,height:4,background:"rgba(255,255,255,.2)",borderRadius:99,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:pct>85?"#f87171":"rgba(255,255,255,.8)",borderRadius:99,transition:"width .4s"}}/></div>}
               <p style={{fontSize:10,color:"rgba(255,255,255,.5)",marginTop:6}}>Fecha dia {selC.closing||10} · Vence dia {selC.due}</p>
+              {isPaid&&invData?.paidDate&&<p style={{fontSize:10,color:"#34d399",marginTop:4}}>Pago em {pd(invData.paidDate).toLocaleDateString("pt-BR")} · {bnks.find(b=>b.id===invData.bankId)?.name||""}</p>}
             </div>
+
+            {/* Pay Invoice button — shown when closed (past closing day) and not yet paid */}
+            {isClosed&&!isPaid&&sp>0&&<button
+              onClick={()=>setInvPayMdl({card:selC,month:m,year:y,total:sp})}
+              style={{background:"linear-gradient(135deg,#f59e0b,#ef4444)",color:"#fff",border:"none",borderRadius:13,padding:14,fontSize:15,fontWeight:700,width:"100%"}}>
+              💳 Pagar Fatura — {fmt(sp)}
+            </button>}
+
             {cInst.length>0&&<div className="card">
               <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Parcelamentos neste cartão</p>
               {cInst.map(ins=>{const paid=tx.filter(t=>t.iid===ins.id&&t.paid!==false).length,rem=ins.icount-paid,p2=Math.min((paid/ins.icount)*100,100);return(
@@ -1473,7 +1416,67 @@ export default function App(){
               + Lançar na Fatura
             </button>
             {!cItems.length&&<p style={{textAlign:"center",fontSize:12,color:"#475569",padding:"22px 0"}}>Sem lançamentos neste mês</p>}
-            {cItems.map((t,i)=><TxRow key={t.id||t._fid||i} t={{...t,real:!!t.real}} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover?",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
+            {cItems.map((t,i)=><TxRow key={t.id||t._fid||i} t={{...t,real:!!t.real}} onE={startE} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover?",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
+          </div>;
+        })()}
+
+        {/* ══ BANK DETAIL ══ */}
+        {view==="bank"&&selB&&(()=>{
+          const firstOfMonth=new Date(y,m,1);
+          const openBal=bbalUntil(selB,firstOfMonth);
+          const bItems=tx.filter(t=>t.atype==="bank"&&t.aid===selB.id&&(()=>{const d=pd(t.date);return d.getMonth()===m&&d.getFullYear()===y;})());
+          const bItemsAll=[...bItems].sort((a,b2)=>pd(b2.date)-pd(a.date));
+          const paidIn=bItems.filter(t=>t.type==="receita"&&t.paid!==false).reduce((s,t)=>s+t.amt,0);
+          const paidOut=bItems.filter(t=>t.type==="despesa"&&t.paid!==false).reduce((s,t)=>s+t.amt,0);
+          const pendIn=bItems.filter(t=>t.type==="receita"&&t.paid===false).reduce((s,t)=>s+t.amt,0);
+          const pendOut=bItems.filter(t=>t.type==="despesa"&&t.paid===false).reduce((s,t)=>s+t.amt,0);
+          const closeBal=openBal+paidIn-paidOut;
+          const projBal=closeBal+pendIn-pendOut;
+          return<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:12}}>
+            <Hd back={()=>nav("home")} title={`Extrato — ${selB.name}`}/>
+
+            {/* Account header card */}
+            <div className="vc" style={{background:`linear-gradient(135deg,${selB.color}cc,${selB.color}66)`,border:`1px solid ${selB.color}44`}}>
+              <div style={{position:"absolute",top:-18,right:-18,width:90,height:90,borderRadius:"50%",background:"rgba(255,255,255,.06)"}}/>
+              <p style={{fontSize:24}}>{selB.icon}</p>
+              <p style={{fontSize:16,fontWeight:700,color:"#fff",marginTop:6}}>{selB.name}</p>
+              {selB.hidden&&<span style={{fontSize:10,color:"rgba(255,255,255,.5)"}}>conta oculta</span>}
+
+              {/* Balance row */}
+              <div style={{display:"flex",gap:18,marginTop:10,flexWrap:"wrap"}}>
+                <div>
+                  <p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>SALDO ANTERIOR</p>
+                  <p style={{fontSize:13,fontWeight:600,color:"rgba(255,255,255,.8)",fontFamily:"'DM Mono',monospace"}}>{fmt(openBal)}</p>
+                </div>
+                <div style={{width:1,background:"rgba(255,255,255,.2)"}}/>
+                <div>
+                  <p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>SALDO ATUAL</p>
+                  <p style={{fontSize:20,fontWeight:700,color:closeBal>=0?"#a7f3d0":"#fca5a5",fontFamily:"'DM Mono',monospace"}}>{fmt(closeBal)}</p>
+                </div>
+                {(pendIn>0||pendOut>0)&&<>
+                  <div style={{width:1,background:"rgba(255,255,255,.2)"}}/>
+                  <div>
+                    <p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>PROJETADO</p>
+                    <p style={{fontSize:13,fontWeight:600,color:projBal>=0?"#7dd3fc":"#fca5a5",fontFamily:"'DM Mono',monospace"}}>{fmt(projBal)}</p>
+                  </div>
+                </>}
+              </div>
+
+              {/* Month summary */}
+              <div style={{display:"flex",gap:14,marginTop:10}}>
+                <div><p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>↑ Entradas</p><p style={{fontSize:12,fontWeight:600,color:"#a7f3d0"}}>{fmt(paidIn)}</p></div>
+                <div><p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>↓ Saídas</p><p style={{fontSize:12,fontWeight:600,color:"#fca5a5"}}>{fmt(paidOut)}</p></div>
+                {pendOut>0&&<div><p style={{fontSize:9,color:"rgba(255,255,255,.6)"}}>⏳ Pendente</p><p style={{fontSize:12,fontWeight:600,color:"#fde68a"}}>{fmt(pendOut)}</p></div>}
+              </div>
+            </div>
+
+            <button onClick={()=>{setForm({...mf(),atype:"bank",aid:selB.id});nav("add");}}
+              style={{background:`linear-gradient(135deg,${selB.color},${selB.color}99)`,color:"#fff",border:"none",borderRadius:13,padding:13,fontSize:14,fontWeight:700,width:"100%"}}>
+              + Novo Lançamento
+            </button>
+
+            {!bItemsAll.length&&<p style={{textAlign:"center",fontSize:12,color:"#475569",padding:"28px 0"}}>Nenhum lançamento neste mês</p>}
+            {bItemsAll.map((t,i)=><TxRow key={t.id||i} t={{...t,real:true}} onE={startE} onTogglePaid={!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover lançamento?",body:"Esta ação não pode ser desfeita.",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
           </div>;
         })()}
 
@@ -1508,7 +1511,7 @@ export default function App(){
           {id:"hist",    label:"Extrato", icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>},
         ].map(tab=>(
           <button key={tab.id}
-            className={`nb ${(view===tab.id||(tab.id==="accounts"&&["card","budgets","cashflow"].includes(view)))?"on":""}`}
+            className={`nb ${(view===tab.id||(tab.id==="accounts"&&["card","budgets","cashflow","bank"].includes(view)))?"on":""}`}
             style={tab.id==="add"?{color:"#38bdf8"}:{}}
             onClick={()=>nav(tab.id)}>
             {tab.icon}{tab.label}
