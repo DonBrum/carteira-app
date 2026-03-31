@@ -59,8 +59,18 @@ export default function App(){
   const [invPayMdl,  setInvPayMdl] = useState(null); // {card, month, year, total} for invoice payment
   const saveTimer      = useRef(null);
   const mainRef        = useRef(null);
+  const userRef        = useRef(null); // always current user for use in event handlers
+
+  // Pull-to-refresh state
+  const [ptr,     setPtr]    = useState(0);    // drag distance px
+  const [ptrSaving,setPtrSaving]=useState(false); // showing sync indicator
+  const ptrActive  = useRef(false);
+  const ptrStartY  = useRef(0);
 
   const nav=useCallback(v=>{setView(v);setTimeout(()=>mainRef.current?.scrollTo({top:0,behavior:"instant"}),0);},[]);
+
+  // Keep userRef current for use in event listeners that can't close over state
+  useEffect(()=>{userRef.current=user;},[user]);
 
   // ── Auth + real-time Firestore listener ──
   useEffect(()=>{
@@ -132,6 +142,58 @@ export default function App(){
     return()=>{document.removeEventListener("visibilitychange",lock);window.removeEventListener("blur",lockBlur);};
   },[savedPin,user]);
 
+  // ── Pull-to-refresh ──
+  useEffect(()=>{
+    const el=mainRef.current;
+    if(!el)return;
+    const onStart=e=>{
+      if(el.scrollTop>0)return; // only trigger when already at top
+      ptrActive.current=true;
+      ptrStartY.current=e.touches[0].clientY;
+    };
+    const onMove=e=>{
+      if(!ptrActive.current)return;
+      const dy=e.touches[0].clientY-ptrStartY.current;
+      if(dy<0){ptrActive.current=false;setPtr(0);return;}
+      e.preventDefault(); // prevent native scroll while pulling
+      setPtr(Math.min(dy,80));
+    };
+    const onEnd=async()=>{
+      if(!ptrActive.current)return;
+      ptrActive.current=false;
+      if(ptr>=60){
+        setPtrSaving(true);
+        await saveNow();
+        // Also re-fetch from server to pull remote changes
+        try{
+          const snap=await getDoc(userDoc(userRef.current?.uid));
+          if(snap.exists()){
+            const d=snap.data();
+            if(d.tx)       setTx(d.tx);
+            if(d.rec)      setRec(d.rec);
+            if(d.inst)     setInst(d.inst);
+            if(d.banks)    setBnks(d.banks);
+            if(d.cards)    setCrds(d.cards);
+            if(d.budg)     setBudg(d.budg);
+            if(d.ccat)     setCcat(d.ccat);
+            if(d.invoices) setInvoices(d.invoices);
+          }
+        }catch(e){console.error("PTR sync:",e);}
+        setTimeout(()=>setPtrSaving(false),1200);
+        toast$("Sincronizado ✓","#34d399");
+      }
+      setPtr(0);
+    };
+    el.addEventListener("touchstart",onStart,{passive:true});
+    el.addEventListener("touchmove",onMove,{passive:false});
+    el.addEventListener("touchend",onEnd);
+    return()=>{
+      el.removeEventListener("touchstart",onStart);
+      el.removeEventListener("touchmove",onMove);
+      el.removeEventListener("touchend",onEnd);
+    };
+  },[ptr,saveNow]);
+
   // ── Refs para ter sempre o valor atual nos saves ──
   const txRef   = useRef(tx);
   const recRef  = useRef(rec);
@@ -167,6 +229,30 @@ export default function App(){
       });
     },800);
   },[user]);
+
+  // ── Immediate save — cancels debounce and saves right now ──
+  const saveNow=useCallback(async()=>{
+    const u=userRef.current;
+    if(!u)return;
+    if(saveTimer.current){clearTimeout(saveTimer.current);saveTimer.current=null;}
+    await saveUserData(u.uid,{
+      tx:       txRef.current,
+      rec:      recRef.current,
+      inst:     instRef.current,
+      banks:    bnksRef.current,
+      cards:    crdsRef.current,
+      budg:     budgRef.current,
+      ccat:     ccatRef.current,
+      invoices: invRef.current,
+    });
+  },[]);
+
+  // ── Save immediately when app goes to background ──
+  useEffect(()=>{
+    const handleHide=()=>{if(document.hidden)saveNow();};
+    document.addEventListener("visibilitychange",handleHide);
+    return()=>document.removeEventListener("visibilitychange",handleHide);
+  },[saveNow]);
 
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[tx,user,dataLoaded]);
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[rec,user,dataLoaded]);
@@ -805,8 +891,38 @@ export default function App(){
         </div>
       </div>
 
+      {/* ── Pull-to-refresh indicator ── */}
+      {(ptr>0||ptrSaving)&&(
+        <div style={{
+          position:"fixed",top:"calc(56px + env(safe-area-inset-top))",left:"50%",
+          transform:"translateX(-50%)",zIndex:20,
+          display:"flex",alignItems:"center",justifyContent:"center",
+          width:40,height:40,borderRadius:"50%",
+          background:"#1e293b",border:"1px solid #334155",
+          boxShadow:"0 4px 16px rgba(0,0,0,.4)",
+          transition:"opacity .2s",
+          opacity:ptrSaving?1:ptr/60,
+        }}>
+          {ptrSaving
+            ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#34d399" strokeWidth="2.5" style={{animation:"spin 0.8s linear infinite"}}>
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+              </svg>
+            : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={ptr>=60?"#34d399":"#64748b"} strokeWidth="2.5">
+                <path d="M12 5v14M5 12l7-7 7 7"/>
+              </svg>
+          }
+        </div>
+      )}
+      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+
       {/* Scrollable content */}
-      <div ref={mainRef} style={{overflowY:"auto",paddingBottom:"calc(76px + env(safe-area-inset-bottom))",WebkitOverflowScrolling:"touch"}}>
+      <div ref={mainRef} style={{
+        overflowY:"auto",
+        paddingBottom:"calc(76px + env(safe-area-inset-bottom))",
+        WebkitOverflowScrolling:"touch",
+        transform:ptr>0?`translateY(${ptr*0.4}px)`:"none",
+        transition:ptr>0?"none":"transform .25s ease",
+      }}>
 
         {/* ══ HOME ══ */}
         {view==="home"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:13}}>
