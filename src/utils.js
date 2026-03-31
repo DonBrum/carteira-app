@@ -35,17 +35,32 @@ export const addF=(s,f)=>{
 };
 
 // Card billing cycle
-// Compra até o fechamento → vence dueDay deste mês
-// Compra após o fechamento → vence dueDay do mês seguinte
+// Regra: encontrar o próximo fechamento a partir da data da compra.
+// O vencimento é sempre no mês seguinte ao fechamento.
+//
+// Exemplos com fechamento=29, vencimento=6:
+//   Compra 28/03 → fecha 29/03 → vence 06/04  (compra <= fechamento → fecha este mês)
+//   Compra 30/03 → fecha 29/04 → vence 06/05  (compra > fechamento → fecha mês seguinte)
+//   Compra 29/03 → fecha 29/03 → vence 06/04  (dia igual ao fechamento → fecha este mês)
 export const cardPayDate=(purchaseDate,closingDay,dueDay)=>{
   const closing=parseInt(closingDay)||10;
   const due=parseInt(dueDay)||17;
   const d=pd(purchaseDate);
   const day=d.getDate();
-  const addMonth=day>closing?1:0;
-  const targetMonth=d.getMonth()+addMonth;
-  const targetYear=d.getFullYear()+(targetMonth>11?1:0);
-  return new Date(targetYear,targetMonth%12,due).toISOString().split("T")[0];
+  const purchaseMonth=d.getMonth();
+  const purchaseYear=d.getFullYear();
+
+  // Find the closing date of this cycle:
+  // If purchase day <= closing day → closes this month
+  // If purchase day >  closing day → closes next month
+  const closingMonth = day<=closing ? purchaseMonth : purchaseMonth+1;
+  const closingYear  = purchaseYear + (closingMonth>11?1:0);
+
+  // Due date is always the month after closing
+  const dueMonth = (closingMonth%12)+1;
+  const dueYear  = closingYear + (closingMonth>=11?1:0);
+
+  return new Date(dueYear, dueMonth%12, due).toISOString().split("T")[0];
 };
 
 // ── Recurring helpers ──────────────────────────────────────────────────────────

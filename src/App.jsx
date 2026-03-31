@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { auth, db, provider } from "./firebase";
 import { signOut, onAuthStateChanged } from "firebase/auth";
-import { doc, setDoc, onSnapshot } from "firebase/firestore";
+import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
 
 // ── External modules ───────────────────────────────────────────────────────────
 import { DC, EMOJIS, BCOLS, CCOLS, PCOLS, MS, BICONS, CICONS, FREQS, EB, EC } from "./constants";
@@ -64,25 +64,38 @@ export default function App(){
 
   // ── Auth + real-time Firestore listener ──
   useEffect(()=>{
-    // Ref to store the Firestore unsubscribe so we can clean it up on logout
     let unsubFirestore=null;
 
-    const unsubAuth=onAuthStateChanged(auth,u=>{
+    const unsubAuth=onAuthStateChanged(auth,async u=>{
       setUser(u);
-
-      // Clean up any previous Firestore listener before setting a new one
       if(unsubFirestore){unsubFirestore();unsubFirestore=null;}
 
       if(u){
-        // onSnapshot fires immediately with current data, then on every remote change
+        // ── 1. Carga inicial com getDoc — rápido e confiável ──
+        try{
+          const snap=await getDoc(userDoc(u.uid));
+          const data=snap.exists()?snap.data():{};
+          if(data.tx)       setTx(data.tx);
+          if(data.rec)      setRec(data.rec);
+          if(data.inst)     setInst(data.inst);
+          if(data.banks)    setBnks(data.banks);
+          if(data.cards)    setCrds(data.cards);
+          if(data.budg)     setBudg(data.budg);
+          if(data.ccat)     setCcat(data.ccat);
+          if(data.invoices) setInvoices(data.invoices);
+          if(data.pin)      setSavedPin(data.pin);
+        }catch(e){console.error("Initial load:",e);}
+        setDataLoaded(true);
+        setLocked(true);
+
+        // ── 2. onSnapshot apenas para sync entre dispositivos ──
+        // fromCache=true  → dado local, já carregamos com getDoc, ignora
+        // hasPendingWrites=true → escrita deste dispositivo, ignora
         unsubFirestore=onSnapshot(
           userDoc(u.uid),
           snapshot=>{
-            // hasPendingWrites = true  → change came from THIS device (we wrote it)
-            // hasPendingWrites = false → change came from the SERVER (another device)
-            // Only apply when coming from server to avoid overwriting local state mid-edit
             if(snapshot.metadata.hasPendingWrites) return;
-
+            if(snapshot.metadata.fromCache) return;
             const data=snapshot.exists()?snapshot.data():{};
             if(data.tx)       setTx(data.tx);
             if(data.rec)      setRec(data.rec);
@@ -93,14 +106,8 @@ export default function App(){
             if(data.ccat)     setCcat(data.ccat);
             if(data.invoices) setInvoices(data.invoices);
             if(data.pin)      setSavedPin(data.pin);
-            // First load: mark data as ready and require PIN unlock
-            // Subsequent syncs: just update data silently, don't re-lock
-            setDataLoaded(prev=>{
-              if(!prev) setLocked(true); // first load → require PIN
-              return true;
-            });
           },
-          err=>{console.error("Firestore listener:",err);}
+          err=>{console.error("Firestore sync:",err);}
         );
       } else {
         setTx([]);setRec([]);setInst([]);setBnks([]);setCrds([]);setBudg({});
@@ -1306,8 +1313,8 @@ export default function App(){
               <div style={{background:"#0f172a",borderRadius:10,padding:"9px 13px",border:"1px solid #334155"}}>
                 <p style={{fontSize:9,color:"#64748b",marginBottom:4}}>COMO FUNCIONA O CICLO</p>
                 <p style={{fontSize:11,color:"#94a3b8",lineHeight:1.6}}>
-                  Compras até dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fatura vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> deste mês.<br/>
-                  Compras após dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fatura vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> do mês seguinte.
+                  Compras até dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fecha neste mês → vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> do mês seguinte.<br/>
+                  Compras após dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fecha no mês seguinte → vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> dois meses à frente.
                 </p>
               </div>
               <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{CCOLS.map(c=><div key={c} className={`cdot ${cf.color===c?"on":""}`} onClick={()=>setCf(f=>({...f,color:c}))} style={{background:c}}/>)}</div>
