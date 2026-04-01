@@ -1,7 +1,7 @@
 // ── App CSS ────────────────────────────────────────────────────────────────────
 export const CSS=`
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{background:#0f172a;overscroll-behavior:none;overflow:hidden;height:100%}
+html,body{background:#0f172a;overscroll-behavior-y:none}
 input,select,textarea{font-family:inherit;outline:none;color:#e2e8f0;font-size:16px;-webkit-appearance:none;appearance:none}
 button{cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
 ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#1e293b}::-webkit-scrollbar-thumb{background:#334155;border-radius:4px}
@@ -32,7 +32,6 @@ button{cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparen
 .fc{border-left:3px solid #7dd3fc;opacity:.75}
 .unpaid-row{opacity:.65;border-left:3px solid #f59e0b}
 .overdue-row{opacity:.8;border-left:3px solid #ef4444}
-.scroll-area{overscroll-behavior:none;-webkit-overflow-scrolling:touch}
 select.fi{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;padding-right:36px}
 select option{background:#1e293b;color:#e2e8f0}
 `;

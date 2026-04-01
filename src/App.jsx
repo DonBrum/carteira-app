@@ -61,12 +61,6 @@ export default function App(){
   const mainRef        = useRef(null);
   const userRef        = useRef(null); // always current user for use in event handlers
 
-  // Pull-to-refresh state
-  const [ptr,     setPtr]    = useState(0);    // drag distance px
-  const [ptrSaving,setPtrSaving]=useState(false); // showing sync indicator
-  const ptrActive  = useRef(false);
-  const ptrStartY  = useRef(0);
-
   const nav=useCallback(v=>{setView(v);setTimeout(()=>mainRef.current?.scrollTo({top:0,behavior:"instant"}),0);},[]);
 
   // Keep userRef current for use in event listeners that can't close over state
@@ -201,57 +195,6 @@ export default function App(){
     document.addEventListener("visibilitychange",handleHide);
     return()=>document.removeEventListener("visibilitychange",handleHide);
   },[saveNow]);
-
-  // ── Pull-to-refresh ──
-  useEffect(()=>{
-    const el=mainRef.current;
-    if(!el)return;
-    const onStart=e=>{
-      if(el.scrollTop>0)return;
-      ptrActive.current=true;
-      ptrStartY.current=e.touches[0].clientY;
-    };
-    const onMove=e=>{
-      if(!ptrActive.current)return;
-      const dy=e.touches[0].clientY-ptrStartY.current;
-      if(dy<0){ptrActive.current=false;setPtr(0);return;}
-      e.preventDefault();
-      setPtr(Math.min(dy,80));
-    };
-    const onEnd=async()=>{
-      if(!ptrActive.current)return;
-      ptrActive.current=false;
-      if(ptr>=60){
-        setPtrSaving(true);
-        await saveNow();
-        try{
-          const snap=await getDoc(userDoc(userRef.current?.uid));
-          if(snap.exists()){
-            const d=snap.data();
-            if(d.tx)       setTx(d.tx);
-            if(d.rec)      setRec(d.rec);
-            if(d.inst)     setInst(d.inst);
-            if(d.banks)    setBnks(d.banks);
-            if(d.cards)    setCrds(d.cards);
-            if(d.budg)     setBudg(d.budg);
-            if(d.ccat)     setCcat(d.ccat);
-            if(d.invoices) setInvoices(d.invoices);
-          }
-        }catch(e){console.error("PTR sync:",e);}
-        setTimeout(()=>setPtrSaving(false),1200);
-        toast$("Sincronizado ✓","#34d399");
-      }
-      setPtr(0);
-    };
-    el.addEventListener("touchstart",onStart,{passive:true});
-    el.addEventListener("touchmove",onMove,{passive:false});
-    el.addEventListener("touchend",onEnd);
-    return()=>{
-      el.removeEventListener("touchstart",onStart);
-      el.removeEventListener("touchmove",onMove);
-      el.removeEventListener("touchend",onEnd);
-    };
-  },[ptr,saveNow]);
 
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[tx,user,dataLoaded]);
   useEffect(()=>{if(user&&dataLoaded)saveToFirestore();},[rec,user,dataLoaded]);
@@ -817,42 +760,39 @@ export default function App(){
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:998,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
           <div className="card si" style={{width:"100%",maxWidth:340}}>
             <p style={{fontSize:16,fontWeight:700,marginBottom:6}}>✏️ Editar recorrência</p>
-            <p style={{fontSize:12,color:"#94a3b8",marginBottom:20,lineHeight:1.6}}>Deseja aplicar as alterações apenas a este mês, ou a partir deste mês em diante?</p>
+            <p style={{fontSize:12,color:"#94a3b8",marginBottom:20,lineHeight:1.6}}>
+              {eid
+                ? "Deseja aplicar as alterações apenas a este lançamento, ou a partir deste em diante?"
+                : "Deseja atualizar todos os lançamentos futuros desta recorrência?"}
+            </p>
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              <button onClick={()=>{
-                // "Somente este" — patch only this specific tx, keep template untouched
+              {/* "Somente este" — only shown when editing a specific materialised tx */}
+              {eid&&<button onClick={()=>{
                 const {tpl}=recEditMdl;
                 const rawA=parseFloat(String(form.amt).replace(",","."));
                 const txDate=form.date||tpl.startDate;
                 const adjD=adjBiz(txDate,form.bday||"ignore");
                 const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
                 const payDate=cardObj?cardPayDate(adjD,cardObj.closing,cardObj.due):undefined;
-                if(eid){
-                  setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t));
-                } else {
-                  // Materialise as a one-off override
-                  const key=`${tpl.id}__${txDate}`;
-                  const newId=`r_${tpl.id}_${txDate}`;
-                  setTx(p=>{const ex=new Set(p.map(t=>t.id));return ex.has(newId)?p:[{id:newId,rk:key,rid:tpl.id,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,auto:true,paid:false},...p];});
-                }
+                setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t));
                 setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Este lançamento atualizado ✓");setForm(mf());nav("home");
               }} style={{padding:14,background:"#1e3a5f",border:"1px solid #38bdf8",borderRadius:11,color:"#38bdf8",fontWeight:600,fontSize:14,textAlign:"left"}}>
                 📌 Somente este lançamento
                 <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>Altera apenas este mês. Os demais continuam iguais.</p>
-              </button>
+              </button>}
               <button onClick={()=>{
-                // "Este e seguintes" — update template from the tx date onwards
                 const {tpl}=recEditMdl;
                 const rawA=parseFloat(String(form.amt).replace(",","."));
                 const fromDate=form.date||tpl.startDate;
                 const newTpl={...tpl,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,startDate:fromDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,freq:form.freq||tpl.freq,bday:form.bday||tpl.bday,autoPaid:form.autoPaid||false};
-                // Remove auto-generated tx from this date onwards so they regenerate with new values
                 setTx(p=>p.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(fromDate)&&t.auto)));
                 setRec(p=>p.map(r=>r.id===tpl.id?newTpl:r));
-                setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Recorrência atualizada (seguintes) ✓");setForm(mf());nav("home");
+                setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Recorrência atualizada ✓");setForm(mf());nav("home");
               }} style={{padding:14,background:"#064e3b",border:"1px solid #34d399",borderRadius:11,color:"#34d399",fontWeight:600,fontSize:14,textAlign:"left"}}>
-                🔄 Este e os seguintes
-                <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>Atualiza o modelo. Lançamentos futuros usarão os novos valores.</p>
+                🔄 {eid?"Este e os seguintes":"Atualizar recorrência"}
+                <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>
+                  {eid?"Atualiza o modelo. Lançamentos futuros usarão os novos valores.":"Todos os lançamentos futuros usarão os novos valores."}
+                </p>
               </button>
               <button onClick={()=>{setRecEditMdl(null);setRecEid(null);setEid(null);}} style={{padding:12,background:"#334155",border:"none",borderRadius:11,color:"#e2e8f0",fontWeight:600,fontSize:14}}>
                 Cancelar
@@ -890,38 +830,8 @@ export default function App(){
         </div>
       </div>
 
-      {/* ── Pull-to-refresh indicator ── */}
-      {(ptr>0||ptrSaving)&&(
-        <div style={{
-          position:"fixed",top:"calc(56px + env(safe-area-inset-top))",left:"50%",
-          transform:"translateX(-50%)",zIndex:20,
-          display:"flex",alignItems:"center",justifyContent:"center",
-          width:40,height:40,borderRadius:"50%",
-          background:"#1e293b",border:"1px solid #334155",
-          boxShadow:"0 4px 16px rgba(0,0,0,.4)",
-          transition:"opacity .2s",
-          opacity:ptrSaving?1:ptr/60,
-        }}>
-          {ptrSaving
-            ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#34d399" strokeWidth="2.5" style={{animation:"spin 0.8s linear infinite"}}>
-                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-              </svg>
-            : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={ptr>=60?"#34d399":"#64748b"} strokeWidth="2.5">
-                <path d="M12 5v14M5 12l7-7 7 7"/>
-              </svg>
-          }
-        </div>
-      )}
-      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
-
       {/* Scrollable content */}
-      <div ref={mainRef} className="scroll-area" style={{
-        overflowY:"auto",
-        paddingBottom:"calc(76px + env(safe-area-inset-bottom))",
-        WebkitOverflowScrolling:"touch",
-        transform:ptr>0?`translateY(${ptr*0.4}px)`:"none",
-        transition:ptr>0?"none":"transform .25s ease",
-      }}>
+      <div ref={mainRef} style={{overflowY:"auto",paddingBottom:"calc(76px + env(safe-area-inset-bottom))",WebkitOverflowScrolling:"touch"}}>
 
         {/* ══ HOME ══ */}
         {view==="home"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:13}}>
