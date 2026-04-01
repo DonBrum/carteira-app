@@ -1191,7 +1191,10 @@ export default function App(){
 
         {/* ══ REC ══ */}
         {view==="cashflow"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:12}}>
-          <Hd back={()=>nav("home")} title="Recorrências & Parcelamentos"/>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <Hd back={()=>nav("home")} title="Recorrências & Parcelamentos"/>
+            <button onClick={()=>nav("hist")} style={{background:"#1e293b",border:"none",color:"#38bdf8",fontSize:12,fontWeight:600,padding:"7px 12px",borderRadius:9}}>📋 Extrato</button>
+          </div>
           <div className="seg">
             <button className={`st ${rtab==="rec"?"on":""}`} onClick={()=>setRtab("rec")}>🔁 Recorrentes ({rec.length})</button>
             <button className={`st ${rtab==="inst"?"on":""}`} onClick={()=>setRtab("inst")}>📦 Parcelados ({inst.length})</button>
@@ -1536,14 +1539,14 @@ export default function App(){
       {/* ── Bottom Nav ── */}
       <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"#1e293b",borderTop:"1px solid #2d3748",display:"flex",paddingTop:6,paddingBottom:"calc(8px + env(safe-area-inset-bottom))"}}>
         {[
-          {id:"home",    label:"Início",  icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>},
-          {id:"dashs",   label:"Dashs",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="9"/><path d="M12 12L8.5 8.5"/><path d="M12 7v1M17 12h-1M12 17v-1M7 12h1"/></svg>},
-          {id:"add",     label:"Lançar",  icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>},
-          {id:"accounts",label:"Contas",  icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>},
-          {id:"hist",    label:"Extrato", icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>},
+          {id:"home",     label:"Início",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>},
+          {id:"dashs",    label:"Dashs",    icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="9"/><path d="M12 12L8.5 8.5"/><path d="M12 7v1M17 12h-1M12 17v-1M7 12h1"/></svg>},
+          {id:"add",      label:"Lançar",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>},
+          {id:"accounts", label:"Contas",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>},
+          {id:"cashflow", label:"Recorrên.", icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M3 12h18M3 6l4 6-4 6M21 6l-4 6 4 6"/></svg>},
         ].map(tab=>(
           <button key={tab.id}
-            className={`nb ${(view===tab.id||(tab.id==="accounts"&&["card","budgets","cashflow","bank"].includes(view)))?"on":""}`}
+            className={`nb ${(view===tab.id||(tab.id==="accounts"&&["card","budgets","bank"].includes(view)))?"on":""}`}
             style={tab.id==="add"?{color:"#38bdf8"}:{}}
             onClick={()=>nav(tab.id)}>
             {tab.icon}{tab.label}
