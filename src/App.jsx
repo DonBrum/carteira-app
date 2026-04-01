@@ -154,11 +154,16 @@ export default function App(){
   useEffect(()=>{ccatRef.current=ccat;},[ccat]);
   useEffect(()=>{invRef.current=invoices;},[invoices]);
 
-  // ── Debounced Firestore save — salva TUDO de uma vez ──
+  // ── Debounced Firestore save com maxWait ──
+  // Salva 800ms após a última mudança, mas garante save em no máximo 3s
+  // mesmo que o usuário continue lançando sem parar.
+  const saveMaxTimer = useRef(null); // garantia de save máximo
+
   const saveToFirestore=useCallback(()=>{
     if(!user)return;
-    if(saveTimer.current)clearTimeout(saveTimer.current);
-    saveTimer.current=setTimeout(()=>{
+    const doSave=()=>{
+      if(saveTimer.current){clearTimeout(saveTimer.current);saveTimer.current=null;}
+      if(saveMaxTimer.current){clearTimeout(saveMaxTimer.current);saveMaxTimer.current=null;}
       saveUserData(user.uid,{
         tx:       txRef.current,
         rec:      recRef.current,
@@ -169,14 +174,22 @@ export default function App(){
         ccat:     ccatRef.current,
         invoices: invRef.current,
       });
-    },800);
+    };
+    // Debounce: reinicia a cada mudança, salva 800ms após a última
+    if(saveTimer.current)clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(doSave,800);
+    // MaxWait: se ainda não salvou após 3s, salva de qualquer jeito
+    if(!saveMaxTimer.current){
+      saveMaxTimer.current=setTimeout(doSave,3000);
+    }
   },[user]);
 
-  // ── Immediate save — cancels debounce and saves right now ──
+  // ── Immediate save — cancels both timers and saves right now ──
   const saveNow=useCallback(async()=>{
     const u=userRef.current;
     if(!u)return;
     if(saveTimer.current){clearTimeout(saveTimer.current);saveTimer.current=null;}
+    if(saveMaxTimer.current){clearTimeout(saveMaxTimer.current);saveMaxTimer.current=null;}
     await saveUserData(u.uid,{
       tx:       txRef.current,
       rec:      recRef.current,
@@ -369,6 +382,7 @@ export default function App(){
   },[user]);
   const handleLogout=useCallback(async()=>{
     if(saveTimer.current)clearTimeout(saveTimer.current);
+    if(saveMaxTimer.current)clearTimeout(saveMaxTimer.current);
     await signOut(auth);
     toast$("Sessão encerrada","#f97316");
   },[toast$]);
