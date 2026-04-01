@@ -54,6 +54,7 @@ export default function App(){
   const [mdl,  setMdl] = useState(null);
   const [tst,  setTst] = useState(null);
   const [rtab, setRtab]= useState("rec");
+  const [dtab, setDtab]= useState("dashs"); // "dashs" | "metas"
   const [epk,  setEpk] = useState(false);
   const [recEditMdl, setRecEditMdl]= useState(null); // {rec, form} for "só este / seguintes" modal
   const [invPayMdl,  setInvPayMdl] = useState(null); // {card, month, year, total} for invoice payment
@@ -185,20 +186,21 @@ export default function App(){
   },[user]);
 
   // ── Immediate save — cancels both timers and saves right now ──
-  const saveNow=useCallback(async()=>{
+  // Accepts optional overrides to handle React's async state updates
+  const saveNow=useCallback(async(overrides={})=>{
     const u=userRef.current;
     if(!u)return;
     if(saveTimer.current){clearTimeout(saveTimer.current);saveTimer.current=null;}
     if(saveMaxTimer.current){clearTimeout(saveMaxTimer.current);saveMaxTimer.current=null;}
     await saveUserData(u.uid,{
-      tx:       txRef.current,
-      rec:      recRef.current,
-      inst:     instRef.current,
-      banks:    bnksRef.current,
-      cards:    crdsRef.current,
-      budg:     budgRef.current,
-      ccat:     ccatRef.current,
-      invoices: invRef.current,
+      tx:       overrides.tx      ?? txRef.current,
+      rec:      overrides.rec     ?? recRef.current,
+      inst:     overrides.inst    ?? instRef.current,
+      banks:    overrides.banks   ?? bnksRef.current,
+      cards:    overrides.cards   ?? crdsRef.current,
+      budg:     overrides.budg    ?? budgRef.current,
+      ccat:     overrides.ccat    ?? ccatRef.current,
+      invoices: overrides.invoices?? invRef.current,
     });
   },[]);
 
@@ -389,8 +391,10 @@ export default function App(){
 
   // ── Toggle paid ──
   const togglePaid=useCallback(id=>{
-    setTx(p=>p.map(t=>t.id===id?{...t,paid:t.paid===false?true:false}:t));
-  },[]);
+    const newTx=txRef.current.map(t=>t.id===id?{...t,paid:t.paid===false?true:false}:t);
+    setTx(newTx);
+    saveNow({tx:newTx});
+  },[saveNow]);
 
   // ── Auto-confirm: bank auto transactions whose date has passed ──
   useEffect(()=>{
@@ -443,44 +447,53 @@ export default function App(){
       const adjD=adjBiz(form.date,form.bday);const tid=Date.now();
       const toLabel=form.toAtype==="bank"?bnks.find(b=>b.id==form.toAid)?.name||"destino":crds.find(c=>c.id==form.toAid)?.name||"destino";
       const frLabel=form.atype==="bank"?bnks.find(b=>b.id==form.aid)?.name||"origem":crds.find(c=>c.id==form.aid)?.name||"origem";
-      setTx(p=>[
+      const newTxs=[
         {id:tid,  type:"despesa",amt:a,desc:`↔ Para: ${toLabel}`,cat:"transf",date:adjD,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,isTO:true,pair:tid+1,paid:true},
         {id:tid+1,type:"receita",amt:a,desc:`↔ De: ${frLabel}`, cat:"transf",date:adjD,note:form.note||"",atype:form.toAtype,aid:parseInt(form.toAid)||form.toAid,isTE:true,pair:tid,paid:true},
-        ...p
-      ]);
-      toast$("Transferência registrada ✓");setForm(mf());nav("home");return;
+        ...txRef.current
+      ];
+      setTx(newTxs);
+      toast$("Transferência registrada ✓");setForm(mf());nav("home");
+      saveNow({tx:newTxs});return;
     }
     const rawA=form.inst?parseFloat(String(form.tamt).replace(",",".")):parseFloat(String(form.amt).replace(",","."));
     if(!rawA||rawA<=0){toast$("Valor inválido","#ef4444");return;}
     if(!form.desc.trim()){toast$("Descrição obrigatória","#ef4444");return;}
     if(form.inst){
       const ic=parseInt(form.icount)||2;
-      setInst(p=>[...p,{id:Date.now(),type:form.type,tamt:rawA,desc:form.desc,cat:form.cat,startDate:form.date,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,icount:ic,bday:form.bday}]);
-      toast$(`Parcelado em ${ic}x de ${fmt(rawA/ic)} ✓`);setForm(mf());nav("home");return;
+      const newInst=[...instRef.current,{id:Date.now(),type:form.type,tamt:rawA,desc:form.desc,cat:form.cat,startDate:form.date,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,icount:ic,bday:form.bday}];
+      setInst(newInst);
+      toast$(`Parcelado em ${ic}x de ${fmt(rawA/ic)} ✓`);setForm(mf());nav("home");
+      saveNow({inst:newInst});return;
     }
     if(form.freq!=="none"||recEid){
       const tpl={id:recEid||Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,startDate:form.date,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,freq:form.freq,bday:form.bday,autoPaid:form.autoPaid||false};
       if(recEid){
-        // Show choice: update only template (future) or also this single occurrence
         setRecEditMdl({tpl, formSnap:{...form}});
-        return; // modal will call submitRecEdit
+        return;
       }
-      setRec(p=>[...p,tpl]);toast$("Recorrência salva ✓");
-      setForm(mf());nav("home");return;
+      const newRec=[...recRef.current,tpl];
+      setRec(newRec);toast$("Recorrência salva ✓");
+      setForm(mf());nav("home");
+      saveNow({rec:newRec});return;
     }
     const adjD=adjBiz(form.date,form.bday);
-    // Compute card payDate
     const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
     const payDate=cardObj?cardPayDate(adjD,cardObj.closing,cardObj.due):undefined;
     if(eid){
-      setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t));
+      const newTx=txRef.current.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t);
+      setTx(newTx);
       setEid(null);toast$("Atualizado ✓");
+      setForm(mf());nav("home");
+      saveNow({tx:newTx});
     } else {
       const isPaidNow=form.atype==="card"?false:!!form.autoPaid;
-      setTx(p=>[{id:Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,paid:isPaidNow},...p]);
+      const newTx=[{id:Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,paid:isPaidNow},...txRef.current];
+      setTx(newTx);
       toast$(form.type==="receita"?"Receita adicionada ✓":"Despesa adicionada ✓");
+      setForm(mf());nav("home");
+      saveNow({tx:newTx});
     }
-    setForm(mf());nav("home");
   };
 
   const startE=t=>{
@@ -530,14 +543,18 @@ export default function App(){
 
   // Edit a pending (forecast) transaction — materialise it first then edit
   const startFcastE=fc=>{
-    // For forecast recurring: create the tx entry then edit
     if(fc.isRF&&fc.rid&&fc.orig){
       const tpl=rec.find(r=>r.id===fc.rid);if(!tpl)return;
       const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
       const payDate=card?cardPayDate(fc.date,card.closing,card.due):undefined;
       const newId=`r_${tpl.id}_${fc.orig}`;
-      const newTx={id:newId,rk:`${tpl.id}__${fc.orig}`,rid:tpl.id,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:fc.date,payDate,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid,auto:true,paid:false};
-      setTx(p=>{const ex=new Set(p.map(t=>t.id));return ex.has(newId)?p:[newTx,...p];});
+      const existing=txRef.current.find(t=>t.id===newId);
+      if(!existing){
+        const newTx={id:newId,rk:`${tpl.id}__${fc.orig}`,rid:tpl.id,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:fc.date,payDate,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid,auto:true,paid:false};
+        const newTxList=[newTx,...txRef.current];
+        setTx(newTxList);
+        saveNow({tx:newTxList});
+      }
       setEid(newId);
       setForm({...mf(),type:tpl.type,amt:String(tpl.amt),desc:tpl.desc,cat:tpl.cat,date:fc.date,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid});
       nav("add");
@@ -550,28 +567,60 @@ export default function App(){
     setForm({...mf(),type:r.type,amt:String(r.amt),desc:r.desc,cat:r.cat,date:r.startDate,note:r.note||"",atype:r.atype||"bank",aid:r.aid||"",freq:r.freq||"monthly",bday:r.bday||"ignore",autoPaid:r.autoPaid||false});
     nav("add");
   };
-  const dTx=id=>{setTx(p=>p.filter(t=>t.id!==id));toast$("Removido","#f97316");};
-  const dRec=id=>{setRec(p=>p.filter(r=>r.id!==id));setTx(p=>p.filter(t=>t.rid!==id));toast$("Removida","#f97316");};
-  const dInst=id=>{setInst(p=>p.filter(i=>i.id!==id));setTx(p=>p.filter(t=>t.iid!==id));toast$("Removido","#f97316");};
-  const sBank=()=>{const bal=parseFloat(String(bf.bal).replace(",","."));if(!bf.name.trim()){toast$("Nome obrigatório","#ef4444");return;}if(ebid){setBnks(p=>p.map(b=>b.id===ebid?{...b,...bf,bal:isNaN(bal)?0:bal}:b));setEbid(null);}else setBnks(p=>[...p,{id:Date.now(),...bf,bal:isNaN(bal)?0:bal}]);setBf(EB);toast$("Banco salvo ✓");};
-  const sCard=()=>{const lim=parseFloat(String(cf.lim).replace(",","."));if(!cf.name.trim()){toast$("Nome obrigatório","#ef4444");return;}if(ecid){setCrds(p=>p.map(c=>c.id===ecid?{...c,...cf,lim:isNaN(lim)?0:lim}:c));setEcid(null);}else setCrds(p=>[...p,{id:Date.now(),...cf,lim:isNaN(lim)?0:lim}]);setCf(EC);toast$("Cartão salvo ✓");};
-  const sCat=()=>{if(!catF.label.trim()){toast$("Nome obrigatório","#ef4444");return;}const nc={id:`c_${Date.now()}`,label:catF.label,icon:catF.icon,l:catF.label,i:catF.icon,custom:true};setCcat(p=>({...p,[catF.type]:[...(p[catF.type]||[]),nc]}));setCatF({label:"",icon:"🎯",type:"despesa"});toast$("Categoria criada ✓");};
-  const dCat=(type,id)=>{setCcat(p=>({...p,[type]:(p[type]||[]).filter(c=>c.id!==id)}));toast$("Removida","#f97316");};
-  const dBank=id=>{setBnks(p=>p.filter(b=>b.id!==id));toast$("Removido","#f97316");};
-  const dCard=id=>{setCrds(p=>p.filter(c=>c.id!==id));toast$("Removido","#f97316");};
-  const toggleHidden=id=>{setBnks(p=>p.map(b=>b.id===id?{...b,hidden:!b.hidden}:b));};
+  const dTx=id=>{const newTx=txRef.current.filter(t=>t.id!==id);setTx(newTx);toast$("Removido","#f97316");saveNow({tx:newTx});};
+  const dRec=id=>{
+    const newRec=recRef.current.filter(r=>r.id!==id);
+    const newTx=txRef.current.filter(t=>t.rid!==id);
+    setRec(newRec);setTx(newTx);toast$("Removida","#f97316");
+    saveNow({rec:newRec,tx:newTx});
+  };
+  const dInst=id=>{
+    const newInst=instRef.current.filter(i=>i.id!==id);
+    const newTx=txRef.current.filter(t=>t.iid!==id);
+    setInst(newInst);setTx(newTx);toast$("Removido","#f97316");
+    saveNow({inst:newInst,tx:newTx});
+  };
+  const sBank=()=>{
+    const bal=parseFloat(String(bf.bal).replace(",","."));
+    if(!bf.name.trim()){toast$("Nome obrigatório","#ef4444");return;}
+    const newBnks=ebid
+      ?bnksRef.current.map(b=>b.id===ebid?{...b,...bf,bal:isNaN(bal)?0:bal}:b)
+      :[...bnksRef.current,{id:Date.now(),...bf,bal:isNaN(bal)?0:bal}];
+    setBnks(newBnks);if(ebid)setEbid(null);setBf(EB);
+    toast$("Banco salvo ✓");saveNow({banks:newBnks});
+  };
+  const sCard=()=>{
+    const lim=parseFloat(String(cf.lim).replace(",","."));
+    if(!cf.name.trim()){toast$("Nome obrigatório","#ef4444");return;}
+    const newCrds=ecid
+      ?crdsRef.current.map(c=>c.id===ecid?{...c,...cf,lim:isNaN(lim)?0:lim}:c)
+      :[...crdsRef.current,{id:Date.now(),...cf,lim:isNaN(lim)?0:lim}];
+    setCrds(newCrds);if(ecid)setEcid(null);setCf(EC);
+    toast$("Cartão salvo ✓");saveNow({cards:newCrds});
+  };
+  const sCat=()=>{
+    if(!catF.label.trim()){toast$("Nome obrigatório","#ef4444");return;}
+    const nc={id:`c_${Date.now()}`,label:catF.label,icon:catF.icon,l:catF.label,i:catF.icon,custom:true};
+    const newCcat={...ccatRef.current,[catF.type]:[...(ccatRef.current[catF.type]||[]),nc]};
+    setCcat(newCcat);setCatF({label:"",icon:"🎯",type:"despesa"});
+    toast$("Categoria criada ✓");saveNow({ccat:newCcat});
+  };
+  const dCat=(type,id)=>{
+    const newCcat={...ccatRef.current,[type]:(ccatRef.current[type]||[]).filter(c=>c.id!==id)};
+    setCcat(newCcat);toast$("Removida","#f97316");saveNow({ccat:newCcat});
+  };
+  const dBank=id=>{const newBnks=bnksRef.current.filter(b=>b.id!==id);setBnks(newBnks);toast$("Removido","#f97316");saveNow({banks:newBnks});};
+  const dCard=id=>{const newCrds=crdsRef.current.filter(c=>c.id!==id);setCrds(newCrds);toast$("Removido","#f97316");saveNow({cards:newCrds});};
+  const toggleHidden=id=>{const newBnks=bnksRef.current.map(b=>b.id===id?{...b,hidden:!b.hidden}:b);setBnks(newBnks);saveNow({banks:newBnks});};
 
   // ── Invoice helpers ──
   const invKey=(cardId,month,year)=>`${cardId}_${year}_${String(month).padStart(2,"0")}`;
 
-  // Returns the status of a card invoice for a given month/year
-  // "paid" | "closed" (past closing day, unpaid) | "open" (current cycle)
   const invStatus=(card,month,year)=>{
     const key=invKey(card.id,month,year);
     if(invoices[key]?.status==="paid") return "paid";
     const today=new Date();
     const closing=parseInt(card.closing)||10;
-    // Closing date for this cycle
     const closeDate=new Date(year,month,closing);
     if(today>closeDate) return "closed";
     return "open";
@@ -582,14 +631,12 @@ export default function App(){
     const key=invKey(card.id,month,year);
     const tid=Date.now();
     const bankName=bnks.find(b=>b.id===bankId)?.name||"conta";
-    // Debit from bank account
     const debit={id:tid,type:"despesa",amt:total,
       desc:`💳 Fatura ${card.name} ${MS[month]}/${year}`,
       cat:"fatura",date:payDate,note:"",
       atype:"bank",aid:bankId,
       isInvoicePay:true,cardId:card.id,invMonth:month,invYear:year,
       paid:true};
-    // Credit on card (zeroes the fatura visually)
     const credit={id:tid+1,type:"receita",amt:total,
       desc:`✅ Pgto fatura ${MS[month]}/${year} — ${bankName}`,
       cat:"fatura",date:payDate,
@@ -597,36 +644,14 @@ export default function App(){
       note:"",atype:"card",aid:card.id,
       isInvoiceCredit:true,cardId:card.id,invMonth:month,invYear:year,
       paid:true};
-    setTx(p=>[debit,credit,...p]);
-    setInvoices(p=>({...p,[key]:{status:"paid",paidDate:payDate,bankId,txIds:[tid,tid+1]}}));
+    const newTx=[debit,credit,...txRef.current];
+    const newInv={...invRef.current,[key]:{status:"paid",paidDate:payDate,bankId,txIds:[tid,tid+1]}};
+    setTx(newTx);
+    setInvoices(newInv);
     toast$("Fatura paga ✓ 🎉");
     setInvPayMdl(null);
+    saveNow({tx:newTx,invoices:newInv});
   };
-
-  // ── Recurring edit handlers ──
-  // "Só este e seguintes" — update template startDate + amt/desc from the chosen date
-  const submitRecEditFuture=()=>{
-    if(!recEditMdl)return;
-    const {tpl}=recEditMdl;
-    // Remove future auto-generated tx from the old template (from chosen startDate onwards)
-    setTx(p=>p.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(tpl.startDate))));
-    setRec(p=>p.map(r=>r.id===tpl.id?tpl:r));
-    setRecEid(null);setRecEditMdl(null);toast$("Recorrência atualizada (seguintes) ✓");
-    setForm(mf());nav("home");
-  };
-  // "Somente este" — keep template unchanged, just update the single materialised tx
-  const submitRecEditOne=()=>{
-    if(!recEditMdl||!eid)return;
-    const {tpl}=recEditMdl;
-    // Keep template, only update this specific tx
-    const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
-    const payDate=cardObj?cardPayDate(tpl.startDate,cardObj.closing,cardObj.due):undefined;
-    const rawA=parseFloat(String(form.amt).replace(",","."));
-    setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:tpl.startDate,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid}:t));
-    setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Lançamento atualizado ✓");
-    setForm(mf());nav("home");
-  };
-
 
 
   // ── Shared UI ──
@@ -788,8 +813,10 @@ export default function App(){
                 const adjD=adjBiz(txDate,form.bday||"ignore");
                 const cardObj=form.atype==="card"?crds.find(c=>c.id==(parseInt(form.aid)||form.aid)):null;
                 const payDate=cardObj?cardPayDate(adjD,cardObj.closing,cardObj.due):undefined;
-                setTx(p=>p.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t));
+                const newTx=txRef.current.map(t=>t.id===eid?{...t,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,...(form._editPaid!==undefined?{paid:form._editPaid}:{})}:t);
+                setTx(newTx);
                 setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Este lançamento atualizado ✓");setForm(mf());nav("home");
+                saveNow({tx:newTx});
               }} style={{padding:14,background:"#1e3a5f",border:"1px solid #38bdf8",borderRadius:11,color:"#38bdf8",fontWeight:600,fontSize:14,textAlign:"left"}}>
                 📌 Somente este lançamento
                 <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>Altera apenas este mês. Os demais continuam iguais.</p>
@@ -799,9 +826,11 @@ export default function App(){
                 const rawA=parseFloat(String(form.amt).replace(",","."));
                 const fromDate=form.date||tpl.startDate;
                 const newTpl={...tpl,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,startDate:fromDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,freq:form.freq||tpl.freq,bday:form.bday||tpl.bday,autoPaid:form.autoPaid||false};
-                setTx(p=>p.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(fromDate)&&t.auto)));
-                setRec(p=>p.map(r=>r.id===tpl.id?newTpl:r));
+                const newTx=txRef.current.filter(t=>!(t.rid===tpl.id&&pd(t.date)>=pd(fromDate)&&t.auto));
+                const newRec=recRef.current.map(r=>r.id===tpl.id?newTpl:r);
+                setTx(newTx);setRec(newRec);
                 setEid(null);setRecEid(null);setRecEditMdl(null);toast$("Recorrência atualizada ✓");setForm(mf());nav("home");
+                saveNow({tx:newTx,rec:newRec});
               }} style={{padding:14,background:"#064e3b",border:"1px solid #34d399",borderRadius:11,color:"#34d399",fontWeight:600,fontSize:14,textAlign:"left"}}>
                 🔄 {eid?"Este e os seguintes":"Atualizar recorrência"}
                 <p style={{fontSize:11,color:"#64748b",fontWeight:400,marginTop:3}}>
@@ -976,7 +1005,32 @@ export default function App(){
 
         {/* ══ DASHS ══ */}
         {view==="dashs"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:13}}>
-          <h2 style={{fontSize:16,fontWeight:700}}>📊 Dashboards</h2>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <h2 style={{fontSize:16,fontWeight:700}}>📊 Dashboards</h2>
+          </div>
+          <div className="seg">
+            <button className={`st ${dtab==="dashs"?"on":""}`} onClick={()=>setDtab("dashs")}>📊 Análise</button>
+            <button className={`st ${dtab==="metas"?"on":""}`} onClick={()=>setDtab("metas")}>🎯 Metas</button>
+          </div>
+
+          {dtab==="metas"&&<>
+            <p style={{fontSize:12,color:"#64748b",marginTop:-5}}>Limite mensal de despesas por categoria.</p>
+            {cats.despesa.map(cat=>{const sp=catD[cat.id]||0,bg=budg[cat.id],pct=bg?Math.min((sp/bg)*100,100):0,ov=bg&&sp>bg;return(
+              <div key={cat.id} className="card" style={{padding:"13px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <span style={{fontWeight:600,fontSize:13}}>{cat.i} {cat.l}</span>
+                  <span style={{fontSize:13,color:ov?"#f87171":"#94a3b8"}}>{fmt(sp)}{bg?` / ${fmt(bg)}`:""}</span>
+                </div>
+                {bg&&<div className="pb" style={{marginBottom:8,height:5}}><div className="pf" style={{width:`${pct}%`,background:ov?"#ef4444":"linear-gradient(90deg,#38bdf8,#818cf8)"}}/></div>}
+                <div style={{display:"flex",gap:8}}>
+                  <input className="fi" type="number" inputMode="decimal" placeholder={bg?fmt(bg):"Definir meta…"} value={bi[cat.id]||""} onChange={e=>setBi(p=>({...p,[cat.id]:e.target.value}))} style={{fontSize:14}}/>
+                  <button onClick={()=>{const v=parseFloat((bi[cat.id]||"").replace(",","."));if(!v||v<=0)return;const newBudg={...budgRef.current,[cat.id]:v};setBudg(newBudg);setBi(p=>({...p,[cat.id]:""}));toast$("Meta salva ✓");saveNow({budg:newBudg});}} style={{background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",color:"#fff",borderRadius:10,padding:"0 14px",fontWeight:600,fontSize:13,flexShrink:0}}>Salvar</button>
+                </div>
+              </div>
+            );})}
+          </>}
+
+          {dtab==="dashs"&&<>
           <div className="card">
             <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5,marginBottom:12}}>Saúde Hoje — Dia {dayN}/{daysM}</p>
             <div style={{display:"flex",gap:14,flexWrap:"wrap",justifyContent:"space-around",alignItems:"center"}}>
@@ -1048,7 +1102,8 @@ export default function App(){
               </div>;
             })}
           </div>}
-        </div>}
+          </>}{/* end dtab==="dashs" */}
+        </div>}{/* end view==="dashs" */}
 
         {/* ══ ADD ══ */}
         {view==="add"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:12}}>
@@ -1530,23 +1585,6 @@ export default function App(){
         })()}
 
         {/* ══ BUDGETS ══ */}
-        {view==="budgets"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:12}}>
-          <h2 style={{fontSize:16,fontWeight:700}}>🎯 Metas por Categoria</h2>
-          <p style={{fontSize:12,color:"#64748b",marginTop:-5}}>Limite mensal de despesas por categoria.</p>
-          {cats.despesa.map(cat=>{const sp=catD[cat.id]||0,bg=budg[cat.id],pct=bg?Math.min((sp/bg)*100,100):0,ov=bg&&sp>bg;return(
-            <div key={cat.id} className="card" style={{padding:"13px"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <span style={{fontWeight:600,fontSize:13}}>{cat.i} {cat.l}</span>
-                <span style={{fontSize:13,color:ov?"#f87171":"#94a3b8"}}>{fmt(sp)}{bg?` / ${fmt(bg)}`:""}</span>
-              </div>
-              {bg&&<div className="pb" style={{marginBottom:8,height:5}}><div className="pf" style={{width:`${pct}%`,background:ov?"#ef4444":"linear-gradient(90deg,#38bdf8,#818cf8)"}}/></div>}
-              <div style={{display:"flex",gap:8}}>
-                <input className="fi" type="number" inputMode="decimal" placeholder={bg?fmt(bg):"Definir meta…"} value={bi[cat.id]||""} onChange={e=>setBi(p=>({...p,[cat.id]:e.target.value}))} style={{fontSize:14}}/>
-                <button onClick={()=>{const v=parseFloat((bi[cat.id]||"").replace(",","."));if(!v||v<=0)return;setBudg(p=>({...p,[cat.id]:v}));setBi(p=>({...p,[cat.id]:""}));toast$("Meta salva ✓");}} style={{background:"linear-gradient(135deg,#38bdf8,#818cf8)",border:"none",color:"#fff",borderRadius:10,padding:"0 14px",fontWeight:600,fontSize:13,flexShrink:0}}>Salvar</button>
-              </div>
-            </div>
-          );})}
-        </div>}
 
       </div>{/* end scrollable */}
 
@@ -1560,7 +1598,7 @@ export default function App(){
           {id:"cashflow", label:"Recorrên.", icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M3 12h18M3 6l4 6-4 6M21 6l-4 6 4 6"/></svg>},
         ].map(tab=>(
           <button key={tab.id}
-            className={`nb ${(view===tab.id||(tab.id==="accounts"&&["card","budgets","bank"].includes(view)))?"on":""}`}
+            className={`nb ${(view===tab.id||(tab.id==="accounts"&&["card","bank"].includes(view)))?"on":""}`}
             style={tab.id==="add"?{color:"#38bdf8"}:{}}
             onClick={()=>nav(tab.id)}>
             {tab.icon}{tab.label}
