@@ -15,7 +15,7 @@ import { InvPayModal } from "./components/InvPayModal";
 const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:"",autoPaid:false});
 
 const userDoc=uid=>doc(db,"users",uid);
-const saveUserData=async(uid,data)=>{try{await setDoc(userDoc(uid),data,{merge:true})}catch(e){console.error("Firestore save:",e)}};
+const saveUserData=async(uid,data)=>{try{await setDoc(userDoc(uid),data,{merge:true})}catch(e){console.error("Firestore save:",e);throw e;}};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App(){
@@ -159,6 +159,7 @@ export default function App(){
   // Salva 800ms após a última mudança, mas garante save em no máximo 3s
   // mesmo que o usuário continue lançando sem parar.
   const saveMaxTimer = useRef(null); // garantia de save máximo
+  const toastRef     = useRef(null); // set after toast$ is defined; used by saveNow for error feedback
 
   const saveToFirestore=useCallback(()=>{
     if(!user)return;
@@ -186,22 +187,36 @@ export default function App(){
   },[user]);
 
   // ── Immediate save — cancels both timers and saves right now ──
-  // Accepts optional overrides to handle React's async state updates
+  // Overrides are applied to refs immediately to prevent debounce race conditions
   const saveNow=useCallback(async(overrides={})=>{
     const u=userRef.current;
     if(!u)return;
+    // Apply overrides to refs immediately so any subsequent debounce reads correct data
+    if(overrides.tx!==undefined)       txRef.current=overrides.tx;
+    if(overrides.rec!==undefined)      recRef.current=overrides.rec;
+    if(overrides.inst!==undefined)     instRef.current=overrides.inst;
+    if(overrides.banks!==undefined)    bnksRef.current=overrides.banks;
+    if(overrides.cards!==undefined)    crdsRef.current=overrides.cards;
+    if(overrides.budg!==undefined)     budgRef.current=overrides.budg;
+    if(overrides.ccat!==undefined)     ccatRef.current=overrides.ccat;
+    if(overrides.invoices!==undefined) invRef.current=overrides.invoices;
+    // Cancel pending debounce — refs are now up to date
     if(saveTimer.current){clearTimeout(saveTimer.current);saveTimer.current=null;}
     if(saveMaxTimer.current){clearTimeout(saveMaxTimer.current);saveMaxTimer.current=null;}
-    await saveUserData(u.uid,{
-      tx:       overrides.tx      ?? txRef.current,
-      rec:      overrides.rec     ?? recRef.current,
-      inst:     overrides.inst    ?? instRef.current,
-      banks:    overrides.banks   ?? bnksRef.current,
-      cards:    overrides.cards   ?? crdsRef.current,
-      budg:     overrides.budg    ?? budgRef.current,
-      ccat:     overrides.ccat    ?? ccatRef.current,
-      invoices: overrides.invoices?? invRef.current,
-    });
+    try{
+      await saveUserData(u.uid,{
+        tx:       txRef.current,
+        rec:      recRef.current,
+        inst:     instRef.current,
+        banks:    bnksRef.current,
+        cards:    crdsRef.current,
+        budg:     budgRef.current,
+        ccat:     ccatRef.current,
+        invoices: invRef.current,
+      });
+    }catch(e){
+      toastRef.current?.("Erro ao salvar — tente novamente","#ef4444");
+    }
   },[]);
 
   // ── Save immediately when app goes to background ──
@@ -235,13 +250,20 @@ export default function App(){
     for(const tpl of rec){
       if(!tpl.freq||tpl.freq==="none")continue;
       for(const o of autoOccs(tpl,done)){
-        // Compute payDate if card
         const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
         const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
         add.push({id:`r_${tpl.id}_${o.orig}`,rk:o.key,rid:tpl.id,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:o.date,payDate,note:tpl.note||"",atype:tpl.atype,aid:tpl.aid,auto:true,paid:tpl.autoPaid===true});
       }
     }
-    if(add.length)setTx(p=>{const ex=new Set(p.map(t=>t.id));return[...p,...add.filter(t=>!ex.has(t.id))];});
+    if(add.length){
+      const ex=new Set(txRef.current.map(t=>t.id));
+      const toAdd=add.filter(t=>!ex.has(t.id));
+      if(toAdd.length){
+        const newTx=[...txRef.current,...toAdd];
+        setTx(newTx);
+        saveNow({tx:newTx});
+      }
+    }
   },[rec,dataLoaded,crds]);
 
   // ── Auto-materialise installments ──
@@ -254,14 +276,22 @@ export default function App(){
         const raw=d.toISOString().split("T")[0];const adj=adjBiz(raw,ins.bday||"ignore");
         if(pd(adj)>now)continue;
         const iid=`i_${ins.id}_${i+1}`;
-        if(!tx.find(t=>t.id===iid)){
+        if(!txRef.current.find(t=>t.id===iid)){
           const card=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
           const payDate=card?cardPayDate(adj,card.closing,card.due):undefined;
           add.push({id:iid,iid:ins.id,iidx:i+1,type:ins.type,amt:ins.tamt/ins.icount,desc:ins.desc,cat:ins.cat,date:adj,payDate,note:ins.note||"",atype:ins.atype,aid:ins.aid,auto:true,paid:false});
         }
       }
     }
-    if(add.length)setTx(p=>{const ex=new Set(p.map(t=>t.id));return[...p,...add.filter(t=>!ex.has(t.id))];});
+    if(add.length){
+      const ex=new Set(txRef.current.map(t=>t.id));
+      const toAdd=add.filter(t=>!ex.has(t.id));
+      if(toAdd.length){
+        const newTx=[...txRef.current,...toAdd];
+        setTx(newTx);
+        saveNow({tx:newTx});
+      }
+    }
   },[inst,dataLoaded,crds]);
 
   // ── Derived data ──
@@ -377,9 +407,19 @@ export default function App(){
   const pM=useCallback(()=>setFilt(f=>f.m===0?{m:11,y:f.y-1}:{m:f.m-1,y:f.y}),[]);
   const nM=useCallback(()=>setFilt(f=>f.m===11?{m:0,y:f.y+1}:{m:f.m+1,y:f.y}),[]);
   const toast$=useCallback((msg,col="#22c55e")=>{setTst({msg,col});setTimeout(()=>setTst(null),2600);},[]);
+  toastRef.current=toast$;
 
   const handleUnlock=useCallback((newPin)=>{
-    if(newPin){setSavedPin(newPin);saveUserData(user.uid,{pin:newPin});}
+    if(newPin){
+      setSavedPin(newPin);
+      // Save pin alongside full current state to avoid partial merge edge cases
+      saveUserData(user.uid,{
+        pin:newPin,
+        tx:txRef.current,rec:recRef.current,inst:instRef.current,
+        banks:bnksRef.current,cards:crdsRef.current,
+        budg:budgRef.current,ccat:ccatRef.current,invoices:invRef.current,
+      });
+    }
     setLocked(false);
   },[user]);
   const handleLogout=useCallback(async()=>{
@@ -400,18 +440,15 @@ export default function App(){
   useEffect(()=>{
     if(!dataLoaded)return;
     const today=new Date();today.setHours(0,0,0,0);
-    setTx(p=>{
-      let changed=false;
-      const next=p.map(t=>{
-        // Only bank auto transactions that are still pending
-        if(t.atype==="bank"&&t.auto&&t.paid===false){
-          const d=pd(t.date);d.setHours(0,0,0,0);
-          if(d<=today){changed=true;return{...t,paid:true};}
-        }
-        return t;
-      });
-      return changed?next:p;
+    let changed=false;
+    const next=txRef.current.map(t=>{
+      if(t.atype==="bank"&&t.auto&&t.paid===false){
+        const d=pd(t.date);d.setHours(0,0,0,0);
+        if(d<=today){changed=true;return{...t,paid:true};}
+      }
+      return t;
     });
+    if(changed){setTx(next);saveNow({tx:next});}
   },[dataLoaded,tx.length]);
 
   // ── Installment preview (hook must be before any early return) ──
@@ -626,7 +663,7 @@ export default function App(){
     return "open";
   };
 
-  // Pay invoice: debit from bank, mark fatura as paid
+  // Pay invoice: debit from bank, mark all card txs in the cycle as paid
   const payInvoice=(card,month,year,total,bankId,payDate)=>{
     const key=invKey(card.id,month,year);
     const tid=Date.now();
@@ -644,7 +681,14 @@ export default function App(){
       note:"",atype:"card",aid:card.id,
       isInvoiceCredit:true,cardId:card.id,invMonth:month,invYear:year,
       paid:true};
-    const newTx=[debit,credit,...txRef.current];
+    // Mark all card transactions in this billing cycle as paid
+    const newTx=[debit,credit,...txRef.current.map(t=>{
+      if(t.atype!=="card"||t.aid!==card.id||t.isInvoiceCredit)return t;
+      const payD=t.payDate||cardPayDate(t.date,card.closing,card.due);
+      const d=pd(payD);
+      if(d.getMonth()===month&&d.getFullYear()===year)return{...t,paid:true};
+      return t;
+    })];
     const newInv={...invRef.current,[key]:{status:"paid",paidDate:payDate,bankId,txIds:[tid,tid+1]}};
     setTx(newTx);
     setInvoices(newInv);
@@ -654,7 +698,26 @@ export default function App(){
   };
 
 
-  // ── Shared UI ──
+  // ── Fix paid status for card transactions in already-paid invoices ──
+  const fixInvoicePaid=()=>{
+    const paidInvoices=Object.entries(invRef.current).filter(([,v])=>v.status==="paid");
+    if(!paidInvoices.length){toast$("Nenhuma fatura paga encontrada","#f59e0b");return;}
+    let fixed=0;
+    const newTx=txRef.current.map(t=>{
+      if(t.atype!=="card"||t.paid===true||t.isInvoiceCredit)return t;
+      const card=crdsRef.current.find(c=>c.id===t.aid);
+      if(!card)return t;
+      const payD=t.payDate||cardPayDate(t.date,card.closing,card.due);
+      const d=pd(payD);
+      const key=invKey(t.aid,d.getMonth(),d.getFullYear());
+      if(invRef.current[key]?.status==="paid"){fixed++;return{...t,paid:true};}
+      return t;
+    });
+    if(fixed===0){toast$("Nenhuma transação para corrigir ✓","#34d399");return;}
+    setTx(newTx);
+    saveNow({tx:newTx});
+    toast$(`${fixed} transação${fixed!==1?"ões":""} corrigida${fixed!==1?"s":""} ✓`,"#34d399");
+  };
   const Hd=({back,title})=>(
     <div style={{display:"flex",alignItems:"center",gap:11}}>
       <button onClick={back} style={{background:"#1e293b",border:"none",color:"#94a3b8",width:36,height:36,borderRadius:10,fontSize:18,flexShrink:0}}>←</button>
@@ -672,15 +735,20 @@ export default function App(){
     const today=new Date();today.setHours(0,0,0,0);
 
     // Badge logic:
-    // Card purchase: no paid/pending badge (purchase already happened); show "atrasado" only if fatura date passed unpaid
-    // Bank manual: pending → atrasado if date passed
-    // Bank auto: auto-confirmed by effect, so if still pending here it's edge case
+    // Card: overdue only if payDate passed AND fatura not paid
+    // Bank: overdue if date passed and still pending
     const isOverdue=t.real&&t.paid===false&&(()=>{
       if(isCard){
-        // Card: overdue if payDate has passed
         const checkDate=billingDate?pd(billingDate):pd(t.date);
         checkDate.setHours(0,0,0,0);
-        return checkDate<today;
+        if(checkDate>=today)return false; // not past due yet
+        // Check if the invoice for this billing cycle was already paid
+        if(billingDate){
+          const bd=pd(billingDate);
+          const iKey=`${t.aid}_${bd.getFullYear()}_${String(bd.getMonth()).padStart(2,"0")}`;
+          if(invoices[iKey]?.status==="paid")return false;
+        }
+        return true;
       } else {
         const d=pd(t.date);d.setHours(0,0,0,0);
         return d<today;
@@ -1372,6 +1440,16 @@ export default function App(){
           </>}
 
           {atab==="cards"&&<>
+            {/* Fix button for existing data with wrong paid status */}
+            {Object.values(invoices).some(v=>v.status==="paid")&&(
+              <div style={{background:"#1e293b",borderRadius:12,padding:"12px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                <div>
+                  <p style={{fontSize:12,fontWeight:600,color:"#f59e0b"}}>🔧 Corrigir status de parcelas</p>
+                  <p style={{fontSize:10,color:"#64748b",marginTop:2}}>Marca como pagas as parcelas de faturas já quitadas</p>
+                </div>
+                <button onClick={fixInvoicePaid} className="ab" style={{background:"#451a03",color:"#f59e0b",flexShrink:0,whiteSpace:"nowrap"}}>Corrigir</button>
+              </div>
+            )}
             {crds.map(c=>{const sp=csp(c.id),lim=parseFloat(c.lim)||0,av=lim>0?lim-sp:null,pct=lim>0?Math.min((sp/lim)*100,100):0;return(
               <div key={c.id}>
                 <div className="vc" style={{background:`linear-gradient(135deg,${c.color},${c.color}88)`}}>
@@ -1593,14 +1671,14 @@ export default function App(){
         {[
           {id:"home",     label:"Início",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>},
           {id:"dashs",    label:"Dashs",    icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="9"/><path d="M12 12L8.5 8.5"/><path d="M12 7v1M17 12h-1M12 17v-1M7 12h1"/></svg>},
-          {id:"add",      label:"Lançar",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>},
+          {id:"add",      label:"Lançar",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>, action:()=>{setEid(null);setRecEid(null);setForm({...mf(),...firstAcc});nav("add");}},
           {id:"accounts", label:"Contas",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>},
           {id:"cashflow", label:"Recorrên.", icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M3 12h18M3 6l4 6-4 6M21 6l-4 6 4 6"/></svg>},
         ].map(tab=>(
           <button key={tab.id}
             className={`nb ${(view===tab.id||(tab.id==="accounts"&&["card","bank"].includes(view)))?"on":""}`}
             style={tab.id==="add"?{color:"#38bdf8"}:{}}
-            onClick={()=>nav(tab.id)}>
+            onClick={()=>tab.action?tab.action():nav(tab.id)}>
             {tab.icon}{tab.label}
           </button>
         ))}
