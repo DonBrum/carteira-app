@@ -915,7 +915,7 @@ export default function App(){
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
 
       {/* Scrollable content */}
-      <div ref={mainRef} style={{
+      <div ref={mainRef} className="scroll-area" style={{
         overflowY:"auto",
         paddingBottom:"calc(76px + env(safe-area-inset-bottom))",
         WebkitOverflowScrolling:"touch",
