@@ -667,10 +667,10 @@ export default function App(){
   const invStatus=(card,month,year)=>{
     const key=invKey(card.id,month,year);
     if(invoices[key]?.status==="paid") return "paid";
-    const today=new Date();
+    const today=new Date();today.setHours(0,0,0,0);
     const closing=parseInt(card.closing)||10;
-    const closeDate=new Date(year,month,closing);
-    if(today>closeDate) return "closed";
+    const closeDate=new Date(year,month,closing);closeDate.setHours(0,0,0,0);
+    if(today>=closeDate) return "closed"; // libera no próprio dia do fechamento
     return "open";
   };
 
@@ -1499,8 +1499,8 @@ export default function App(){
               <div style={{background:"#0f172a",borderRadius:10,padding:"9px 13px",border:"1px solid #334155"}}>
                 <p style={{fontSize:9,color:"#64748b",marginBottom:4}}>COMO FUNCIONA O CICLO</p>
                 <p style={{fontSize:11,color:"#94a3b8",lineHeight:1.6}}>
-                  Compras até dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fecha neste mês → vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> do mês seguinte.<br/>
-                  Compras após dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fecha no mês seguinte → vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> dois meses à frente.
+                  Compras até dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fecha neste mês → vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> {parseInt(cf.due||17)>=parseInt(cf.closing||10)?"deste mês":"do mês seguinte"}.<br/>
+                  Compras após dia <strong style={{color:"#38bdf8"}}>{cf.closing||10}</strong> → fecha no mês seguinte → vence dia <strong style={{color:"#34d399"}}>{cf.due||17}</strong> {parseInt(cf.due||17)>=parseInt(cf.closing||10)?"do mês seguinte":"dois meses à frente"}.
                 </p>
               </div>
               <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>{CCOLS.map(c=><div key={c} className={`cdot ${cf.color===c?"on":""}`} onClick={()=>setCf(f=>({...f,color:c}))} style={{background:c}}/>)}</div>
@@ -1559,7 +1559,7 @@ export default function App(){
         {/* ══ CARD DETAIL ══ */}
         {view==="card"&&selC&&(()=>{
           const sp=csp(selC.id),lim=parseFloat(selC.lim)||0,av=lim>0?lim-sp:null,pct=lim>0?Math.min((sp/lim)*100,100):0;
-          const cItems=allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit);
+          const cItems=allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit&&i.real!==false);
           const cInst=inst.filter(i=>i.atype==="card"&&i.aid===selC.id);
           const iStat=invStatus(selC,m,y);
           const isPaid=iStat==="paid";

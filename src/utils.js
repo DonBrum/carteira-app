@@ -35,13 +35,18 @@ export const addF=(s,f)=>{
 };
 
 // Card billing cycle
-// Regra: encontrar o próximo fechamento a partir da data da compra.
-// O vencimento é sempre no mês seguinte ao fechamento.
+// Regra:
+//   1. Encontrar o mês de fechamento (mesmo mês se compra <= fechamento, mês seguinte se depois)
+//   2. Se dueDay >= closingDay → vence no mesmo mês do fechamento
+//      Se dueDay <  closingDay → vence no mês seguinte ao fechamento
+//
+// Exemplos com fechamento=10, vencimento=17:
+//   Compra 05/04 → fecha 10/04 → vence 17/04  (dueDay 17 >= closingDay 10 → mesmo mês)
+//   Compra 15/04 → fecha 10/05 → vence 17/05  (dueDay 17 >= closingDay 10 → mesmo mês)
 //
 // Exemplos com fechamento=29, vencimento=6:
-//   Compra 28/03 → fecha 29/03 → vence 06/04  (compra <= fechamento → fecha este mês)
-//   Compra 30/03 → fecha 29/04 → vence 06/05  (compra > fechamento → fecha mês seguinte)
-//   Compra 29/03 → fecha 29/03 → vence 06/04  (dia igual ao fechamento → fecha este mês)
+//   Compra 05/04 → fecha 29/04 → vence 06/05  (dueDay 6 < closingDay 29 → mês seguinte)
+//   Compra 30/04 → fecha 29/05 → vence 06/06  (dueDay 6 < closingDay 29 → mês seguinte)
 export const cardPayDate=(purchaseDate,closingDay,dueDay)=>{
   const closing=parseInt(closingDay)||10;
   const due=parseInt(dueDay)||17;
@@ -50,15 +55,14 @@ export const cardPayDate=(purchaseDate,closingDay,dueDay)=>{
   const purchaseMonth=d.getMonth();
   const purchaseYear=d.getFullYear();
 
-  // Find the closing date of this cycle:
-  // If purchase day <= closing day → closes this month
-  // If purchase day >  closing day → closes next month
+  // Step 1: find closing month
   const closingMonth = day<=closing ? purchaseMonth : purchaseMonth+1;
   const closingYear  = purchaseYear + (closingMonth>11?1:0);
 
-  // Due date is always the month after closing
-  const dueMonth = (closingMonth%12)+1;
-  const dueYear  = closingYear + (closingMonth>=11?1:0);
+  // Step 2: due date month depends on relationship between dueDay and closingDay
+  const addMonthForDue = due>=closing ? 0 : 1;
+  const dueMonth = closingMonth + addMonthForDue;
+  const dueYear  = closingYear + (dueMonth>11?1:0);
 
   return new Date(dueYear, dueMonth%12, due).toISOString().split("T")[0];
 };

@@ -25,14 +25,22 @@ export function Pie({slices,sz=150,label,sub}){
 }
 
 export function Gauge({pct=0,label,sub,sz=130}){
-  const cp=Math.min(Math.max(pct,0),1),a=cp*Math.PI,r=0.75;
-  const ex=Math.cos(Math.PI-a)*r,ey=-Math.sin(Math.PI-a)*r;
+  const cp=Math.min(Math.max(pct,0),1);
+  const r=0.75;
   const gc=pct>0.85?"#ef4444":pct>0.6?"#f59e0b":"#34d399";
+  // Arc starts at left (-r,0) and sweeps clockwise to right (r,0)
+  // Progress sweeps cp*180 degrees from the left
+  const angle=cp*Math.PI; // 0 to PI
+  const ex= -Math.cos(angle)*r;  // x end point
+  const ey= -Math.sin(angle)*r;  // y end point (negative = up in SVG)
+  const largeArc=cp>0.5?1:0;
   return(
     <div style={{position:"relative",width:sz,height:sz*0.6,flexShrink:0}}>
-      <svg viewBox="-1.1 -1 2.2 1.1" style={{width:sz,height:sz*0.6}}>
+      <svg viewBox="-1.1 -1.1 2.2 1.2" style={{width:sz,height:sz*0.6}}>
+        {/* Background track */}
         <path d={`M${-r} 0A${r} ${r} 0 0 1 ${r} 0`} fill="none" stroke="#1e293b" strokeWidth="0.22" strokeLinecap="round"/>
-        {cp>0.01&&<path d={`M${-r} 0A${r} ${r} 0 ${a>Math.PI/2?1:0} 1 ${ex} ${ey}`} fill="none" stroke={gc} strokeWidth="0.22" strokeLinecap="round"/>}
+        {/* Progress arc */}
+        {cp>0.01&&<path d={`M${-r} 0A${r} ${r} 0 ${largeArc} 1 ${ex} ${ey}`} fill="none" stroke={gc} strokeWidth="0.22" strokeLinecap="round"/>}
       </svg>
       <div style={{position:"absolute",bottom:0,left:0,right:0,textAlign:"center"}}>
         {label&&<p style={{fontSize:13,fontWeight:700,color:gc,fontFamily:"'DM Mono',monospace"}}>{label}</p>}
