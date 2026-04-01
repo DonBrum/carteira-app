@@ -15,7 +15,24 @@ import { InvPayModal } from "./components/InvPayModal";
 const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:"",autoPaid:false});
 
 const userDoc=uid=>doc(db,"users",uid);
-const saveUserData=async(uid,data)=>{try{await setDoc(userDoc(uid),data,{merge:true})}catch(e){console.error("Firestore save:",e);throw e;}};
+
+// Firestore rejects undefined values — strip them recursively before saving
+const stripUndefined=(obj)=>{
+  if(Array.isArray(obj))return obj.map(stripUndefined);
+  if(obj!==null&&typeof obj==="object"){
+    const out={};
+    for(const[k,v]of Object.entries(obj)){
+      if(v!==undefined)out[k]=stripUndefined(v);
+    }
+    return out;
+  }
+  return obj;
+};
+
+const saveUserData=async(uid,data)=>{
+  try{await setDoc(userDoc(uid),stripUndefined(data),{merge:true});}
+  catch(e){console.error("Firestore save:",e);throw e;}
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App(){
@@ -159,7 +176,6 @@ export default function App(){
   // Salva 800ms após a última mudança, mas garante save em no máximo 3s
   // mesmo que o usuário continue lançando sem parar.
   const saveMaxTimer = useRef(null); // garantia de save máximo
-  const toastRef     = useRef(null); // set after toast$ is defined; used by saveNow for error feedback
 
   const saveToFirestore=useCallback(()=>{
     if(!user)return;
@@ -192,31 +208,27 @@ export default function App(){
     const u=userRef.current;
     if(!u)return;
     // Apply overrides to refs immediately so any subsequent debounce reads correct data
-    if(overrides.tx!==undefined)       txRef.current=overrides.tx;
-    if(overrides.rec!==undefined)      recRef.current=overrides.rec;
-    if(overrides.inst!==undefined)     instRef.current=overrides.inst;
-    if(overrides.banks!==undefined)    bnksRef.current=overrides.banks;
-    if(overrides.cards!==undefined)    crdsRef.current=overrides.cards;
-    if(overrides.budg!==undefined)     budgRef.current=overrides.budg;
-    if(overrides.ccat!==undefined)     ccatRef.current=overrides.ccat;
-    if(overrides.invoices!==undefined) invRef.current=overrides.invoices;
+    if(overrides.tx)       txRef.current=overrides.tx;
+    if(overrides.rec)      recRef.current=overrides.rec;
+    if(overrides.inst)     instRef.current=overrides.inst;
+    if(overrides.banks)    bnksRef.current=overrides.banks;
+    if(overrides.cards)    crdsRef.current=overrides.cards;
+    if(overrides.budg)     budgRef.current=overrides.budg;
+    if(overrides.ccat)     ccatRef.current=overrides.ccat;
+    if(overrides.invoices) invRef.current=overrides.invoices;
     // Cancel pending debounce — refs are now up to date
     if(saveTimer.current){clearTimeout(saveTimer.current);saveTimer.current=null;}
     if(saveMaxTimer.current){clearTimeout(saveMaxTimer.current);saveMaxTimer.current=null;}
-    try{
-      await saveUserData(u.uid,{
-        tx:       txRef.current,
-        rec:      recRef.current,
-        inst:     instRef.current,
-        banks:    bnksRef.current,
-        cards:    crdsRef.current,
-        budg:     budgRef.current,
-        ccat:     ccatRef.current,
-        invoices: invRef.current,
-      });
-    }catch(e){
-      toastRef.current?.("Erro ao salvar — tente novamente","#ef4444");
-    }
+    await saveUserData(u.uid,{
+      tx:       txRef.current,
+      rec:      recRef.current,
+      inst:     instRef.current,
+      banks:    bnksRef.current,
+      cards:    crdsRef.current,
+      budg:     budgRef.current,
+      ccat:     ccatRef.current,
+      invoices: invRef.current,
+    });
   },[]);
 
   // ── Save immediately when app goes to background ──
@@ -407,7 +419,6 @@ export default function App(){
   const pM=useCallback(()=>setFilt(f=>f.m===0?{m:11,y:f.y-1}:{m:f.m-1,y:f.y}),[]);
   const nM=useCallback(()=>setFilt(f=>f.m===11?{m:0,y:f.y+1}:{m:f.m+1,y:f.y}),[]);
   const toast$=useCallback((msg,col="#22c55e")=>{setTst({msg,col});setTimeout(()=>setTst(null),2600);},[]);
-  toastRef.current=toast$;
 
   const handleUnlock=useCallback((newPin)=>{
     if(newPin){
