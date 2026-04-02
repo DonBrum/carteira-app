@@ -942,6 +942,18 @@ export default function App(){
             <span style={{fontWeight:700,fontSize:13,color:t.type==="receita"?"#34d399":"#f87171"}}>
               {t.type==="receita"?"+":"-"}{fmt(t.amt)}
             </span>
+            {/* Status badge */}
+            {!isTr&&t.real&&(
+              isOverdue
+                ?<span className="bdg" style={{background:"#450a0a",color:"#ef4444"}}>atrasado</span>
+                :isCard
+                  ?(invoices[billingDate?(()=>{const bd=pd(billingDate);return`${t.aid}_${bd.getFullYear()}_${String(bd.getMonth()).padStart(2,"0")}`;})():""]?.status==="paid"
+                    ?<span className="bdg" style={{background:"#064e3b",color:"#34d399"}}>pago</span>
+                    :<span className="bdg" style={{background:"#0c1e2e",color:"#38bdf8"}}>na fatura</span>)
+                  :isPaid
+                    ?<span className="bdg" style={{background:"#064e3b",color:"#34d399"}}>pago</span>
+                    :<span className="bdg" style={{background:"#451a03",color:"#f59e0b"}}>pendente</span>
+            )}
             {/* Forecast edit button */}
             {!t.real&&onFcastE&&t.isRF&&(
               <button onPointerDown={e=>{e.stopPropagation();onFcastE(t);}}
@@ -1170,12 +1182,20 @@ export default function App(){
               <button onClick={()=>{nav("accounts");setAtab("cards");}} style={{background:"none",border:"none",color:"#38bdf8",fontSize:12}}>gerenciar</button>
             </div>
             <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:4,scrollbarWidth:"none"}}>
-              {crds.map(c=>{const sp=csp(c.id),lim=parseFloat(c.lim)||0,pct=lim>0?Math.min((sp/lim)*100,100):0,ov=lim>0&&sp>lim;return(
-                <div key={c.id} onClick={()=>{setSelC(c);nav("card");}} style={{background:c.color+"33",border:`1px solid ${c.color}55`,borderRadius:14,padding:"11px 14px",minWidth:160,flexShrink:0,cursor:"pointer"}}>
-                  <p style={{fontSize:18}}>{c.icon}</p>
-                  <p style={{fontSize:12,fontWeight:600,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:135}}>{c.name}</p>
+              {crds.map(c=>{
+                const sp=csp(c.id),lim=parseFloat(c.lim)||0,pct=lim>0?Math.min((sp/lim)*100,100):0,ov=lim>0&&sp>lim;
+                const col=c.color||"#1e40af";
+                const iStat=invStatus(c,m,y);
+                return(
+                <div key={c.id} onClick={()=>{setSelC(c);nav("card");}} style={{background:col+"33",border:`1px solid ${col}55`,borderRadius:14,padding:"11px 14px",minWidth:160,flexShrink:0,cursor:"pointer"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <p style={{fontSize:18}}>{c.icon}</p>
+                    {iStat==="paid"&&<span style={{fontSize:9,fontWeight:700,color:"#34d399"}}>✓ paga</span>}
+                    {iStat==="closed"&&<span style={{fontSize:9,fontWeight:700,color:"#f59e0b"}}>⚠ vence</span>}
+                  </div>
+                  <p style={{fontSize:12,fontWeight:600,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:135,color:"#e2e8f0"}}>{c.name}</p>
                   <p style={{fontSize:13,fontWeight:700,color:ov?"#f87171":"#e2e8f0",fontFamily:"'DM Mono',monospace",marginTop:2}}>{fmt(sp)}{lim>0?` / ${fmt(lim)}`:""}</p>
-                  {lim>0&&<div className="pb" style={{marginTop:6}}><div className="pf" style={{width:`${pct}%`,background:ov?"#ef4444":c.color}}/></div>}
+                  {lim>0&&<div className="pb" style={{marginTop:6}}><div className="pf" style={{width:`${pct}%`,background:ov?"#ef4444":col}}/></div>}
                   <p style={{fontSize:9,color:"#64748b",marginTop:4}}>Fecha {c.closing||10} · Vence {c.due}</p>
                 </div>
               );})}
