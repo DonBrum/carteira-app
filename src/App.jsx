@@ -665,10 +665,16 @@ export default function App(){
   const invStatus=(card,month,year)=>{
     const key=invKey(card.id,month,year);
     if(invoices[key]?.status==="paid") return "paid";
-    const today=new Date();today.setHours(0,0,0,0);
     const closing=parseInt(card.closing)||10;
-    const closeDate=new Date(year,month,closing);closeDate.setHours(0,0,0,0);
-    if(today>=closeDate) return "closed"; // libera no próprio dia do fechamento
+    const due=parseInt(card.due)||17;
+    const today=new Date();today.setHours(0,0,0,0);
+    // Compute actual closing month for the cycle DUE in month/year:
+    // due >= closing → closes same month as due (ex: fecha 10, vence 17 → fecha/vence Abr)
+    // due <  closing → closes month BEFORE due  (ex: fecha 29, vence 6  → fecha Mar, vence Abr)
+    const closeMonth=due>=closing?month:(month===0?11:month-1);
+    const closeYear =due>=closing?year :(month===0?year-1:year);
+    const closeDate=new Date(closeYear,closeMonth,closing);closeDate.setHours(0,0,0,0);
+    if(today>=closeDate)return "closed";
     return "open";
   };
 
@@ -1555,32 +1561,15 @@ export default function App(){
         {/* ══ CARD DETAIL ══ */}
         {view==="card"&&selC&&(()=>{
           const sp=csp(selC.id),lim=parseFloat(selC.lim)||0,av=lim>0?lim-sp:null,pct=lim>0?Math.min((sp/lim)*100,100):0;
-          const cItems=[...allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit&&i.real!==false)].sort((a,b)=>pd(b.date)-pd(a.date));
+          // real===true ensures only materialized transactions, no forecasts
+          const cItems=[...allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit&&i.real===true)].sort((a,b)=>pd(b.date)-pd(a.date));
           const cInst=inst.filter(i=>i.atype==="card"&&i.aid===selC.id);
           const iStat=invStatus(selC,m,y);
           const isPaid=iStat==="paid";
           const isClosed=iStat==="closed";
           const invData=invoices[invKey(selC.id,m,y)];
-          // Check previous month for unpaid closed invoice
-          const prevM=m===0?11:m-1;const prevY=m===0?y-1:y;
-          const prevStat=invStatus(selC,prevM,prevY);
-          const prevSp=tx.filter(t=>{
-            if(t.atype!=="card"||t.aid!==selC.id||t.type!=="despesa"||t.isInvoiceCredit)return false;
-            const payD=t.payDate||cardPayDate(t.date,selC.closing,selC.due);
-            const d=pd(payD);return d.getMonth()===prevM&&d.getFullYear()===prevY;
-          }).reduce((s,t)=>s+t.amt,0);
-          const showPrevAlert=prevStat==="closed"&&prevSp>0;
           return<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:12}}>
             <Hd back={()=>nav("home")} title={`Fatura — ${selC.name}`}/>
-
-            {/* Alert: previous month invoice is unpaid */}
-            {showPrevAlert&&<div onClick={()=>setFilt({m:prevM,y:prevY})} style={{background:"#451a03",border:"1px solid #f59e0b",borderRadius:12,padding:"11px 14px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-              <div>
-                <p style={{fontSize:12,fontWeight:700,color:"#f59e0b"}}>⚠ Fatura de {MS[prevM]} aguardando pagamento</p>
-                <p style={{fontSize:10,color:"#92400e",marginTop:2}}>Toque para ir ao mês anterior e pagar</p>
-              </div>
-              <span style={{color:"#f59e0b",fontSize:14,fontWeight:700}}>{fmt(prevSp)}</span>
-            </div>}
             <div className="vc" style={{background:`linear-gradient(135deg,${selC.color},${selC.color}88)`}}>
               <div style={{position:"absolute",top:-18,right:-18,width:90,height:90,borderRadius:"50%",background:"rgba(255,255,255,.06)"}}/>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
