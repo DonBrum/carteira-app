@@ -325,8 +325,13 @@ export default function App(){
 
   const fcasts=useMemo(()=>{
     const items=[];
+    const isFutureMonth=(new Date(y,m,1))>new Date(NOW.getFullYear(),NOW.getMonth(),1);
     for(const tpl of rec){if(!tpl.freq||tpl.freq==="none")continue;
-      for(const o of recInMonth(tpl,m,y)){const d=pd(o.date);if(d<=NOW)continue;
+      for(const o of recInMonth(tpl,m,y)){
+        const d=pd(o.date);
+        // Current month: only show items not yet happened today
+        // Future months: show everything
+        if(!isFutureMonth&&d<=NOW)continue;
         if(!tx.find(t=>t.rk===`${tpl.id}__${o.orig}`)){
           const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
           const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
@@ -335,7 +340,9 @@ export default function App(){
       }
     }
     for(const ins of inst){
-      for(const o of instInMonth(ins,m,y)){const d=pd(o.date);if(d<=NOW)continue;
+      for(const o of instInMonth(ins,m,y)){
+        const d=pd(o.date);
+        if(!isFutureMonth&&d<=NOW)continue;
         const iid=`i_${ins.id}_${o.idx}`;
         if(!tx.find(t=>t.id===iid)){
           const card=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
@@ -403,17 +410,26 @@ export default function App(){
     return visibleBnks.reduce((s,b)=>s+bbalUntil(b,firstDay),0);
   },[visibleBnks,bbalUntil,m,y]);
 
-  // csp: net card spend = despesas minus receitas (estornos/cashback) with payDate in m/y
+  // csp: net card spend for billing cycle in m/y
+  // For future months: includes materialized tx + forecasted items not yet in tx
   const csp=useCallback(cid=>{
     const card=crds.find(c=>c.id===cid);
     if(!card)return 0;
-    return tx.filter(t=>{
+    const fromTx=tx.filter(t=>{
       if(t.atype!=="card"||t.aid!==cid)return false;
       const payD=t.payDate||cardPayDate(t.date,card.closing,card.due);
       const d=pd(payD);
       return d.getMonth()===m&&d.getFullYear()===y;
     }).reduce((s,t)=>s+(t.type==="despesa"?t.amt:-t.amt),0);
-  },[tx,crds,m,y]);
+    // Add forecast items (future parcelas/recorrências not yet materialized)
+    const fromFcasts=fcasts.filter(f=>{
+      if(f.atype!=="card"||f.aid!==cid)return false;
+      const payD=f.payDate||cardPayDate(f.date,card.closing,card.due);
+      const d=pd(payD);
+      return d.getMonth()===m&&d.getFullYear()===y;
+    }).reduce((s,f)=>s+(f.type==="despesa"?f.amt:-f.amt),0);
+    return fromTx+fromFcasts;
+  },[tx,fcasts,crds,m,y]);
   const alab=useCallback(t=>{
     if(t.atype==="bank"){const b=bnks.find(b=>b.id===t.aid);return b?`${b.icon} ${b.name}`:""; }
     if(t.atype==="card"){const c=crds.find(c=>c.id===t.aid);return c?`${c.icon} ${c.name}`:""; }
@@ -1818,7 +1834,8 @@ export default function App(){
         {view==="card"&&selC&&(()=>{
           const sp=csp(selC.id),lim=parseFloat(selC.lim)||0,av=lim>0?lim-sp:null,pct=lim>0?Math.min((sp/lim)*100,100):0;
           // real===true ensures only materialized transactions, no forecasts
-          const cItems=[...allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit&&i.real===true)].sort((a,b)=>pd(b.date)-pd(a.date));
+          const isFutureMonth=(new Date(y,m,1))>new Date(NOW.getFullYear(),NOW.getMonth(),1);
+          const cItems=[...allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit&&(i.real===true||isFutureMonth))].sort((a,b)=>pd(b.date)-pd(a.date));
           const cInst=inst.filter(i=>i.atype==="card"&&i.aid===selC.id);
           const iStat=invStatus(selC,m,y);
           const isPaid=iStat==="paid";

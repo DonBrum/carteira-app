@@ -52,19 +52,21 @@ export const cardPayDate=(purchaseDate,closingDay,dueDay)=>{
   const due=parseInt(dueDay)||17;
   const d=pd(purchaseDate);
   const day=d.getDate();
-  const purchaseMonth=d.getMonth();
+  const purchaseMonth=d.getMonth(); // 0-11
   const purchaseYear=d.getFullYear();
 
-  // Step 1: find closing month
-  const closingMonth = day<=closing ? purchaseMonth : purchaseMonth+1;
-  const closingYear  = purchaseYear + (closingMonth>11?1:0);
+  // Step 1: find closing month (0-11 normalized)
+  const rawClosingMonth = day<=closing ? purchaseMonth : purchaseMonth+1;
+  const closingYear  = purchaseYear + (rawClosingMonth>11?1:0);
+  const closingMonth = rawClosingMonth%12; // normalize to 0-11
 
-  // Step 2: due date month depends on relationship between dueDay and closingDay
+  // Step 2: due date — same month as closing if dueDay >= closingDay, else next month
   const addMonthForDue = due>=closing ? 0 : 1;
-  const dueMonth = closingMonth + addMonthForDue;
-  const dueYear  = closingYear + (dueMonth>11?1:0);
+  const rawDueMonth = closingMonth + addMonthForDue;
+  const dueYear  = closingYear + (rawDueMonth>11?1:0);
+  const dueMonth = rawDueMonth%12; // normalize to 0-11
 
-  return new Date(dueYear, dueMonth%12, due).toISOString().split("T")[0];
+  return new Date(dueYear, dueMonth, due).toISOString().split("T")[0];
 };
 
 // ── Recurring helpers ──────────────────────────────────────────────────────────
