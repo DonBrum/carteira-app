@@ -341,11 +341,9 @@ export default function App(){
     return items.sort((a,b)=>pd(a.date)-pd(b.date));
   },[rec,inst,tx,m,y,NOW,crds]);
 
-  const allM=useMemo(()=>[...confM.map(t=>({...t,real:true})),...fcasts].sort((a,b)=>{
-    const da=pd((a.atype==="card"&&a.payDate)?a.payDate:a.date);
-    const db2=pd((b.atype==="card"&&b.payDate)?b.payDate:b.date);
-    return db2-da;
-  }),[confM,fcasts]);
+  const allM=useMemo(()=>[...confM.map(t=>({...t,real:true})),...fcasts].sort((a,b)=>
+    pd(b.date)-pd(a.date)
+  ),[confM,fcasts]);
 
   // totR/totD: only PAID transactions for "real" balance
   const totR=useMemo(()=>confM.filter(t=>t.type==="receita"&&!t.isTE&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
@@ -736,7 +734,7 @@ export default function App(){
     </div>
   );
 
-  const TxRow=({t,onE,onD,onTogglePaid,onFcastE})=>{
+  const TxRow=({t,onE,onD,onTogglePaid,onFcastE,compact=false})=>{
     const cat=getCat(t.cat);
     const isTr=t.isTO||t.isTE;
     const al=alab(t);
@@ -799,11 +797,13 @@ export default function App(){
             {showCardStatus&&isOverdue&&<span className="bdg" style={{background:"#450a0a",color:"#ef4444",flexShrink:0}}>fatura atrasada</span>}
           </div>
           <p style={{fontSize:10,color:"#64748b",marginTop:1}}>
-            {billingDate
-              ? <><span>compra {pd(t.date).toLocaleDateString("pt-BR")}</span><span style={{color:isOverdue?"#ef4444":"#64748b"}}> · venc {pd(billingDate).toLocaleDateString("pt-BR")}</span></>
-              : pd(t.date).toLocaleDateString("pt-BR")
+            {compact
+              ? pd(t.date).toLocaleDateString("pt-BR")
+              : billingDate
+                ? <><span>compra {pd(t.date).toLocaleDateString("pt-BR")}</span><span style={{color:isOverdue?"#ef4444":"#64748b"}}> · venc {pd(billingDate).toLocaleDateString("pt-BR")}</span></>
+                : pd(t.date).toLocaleDateString("pt-BR")
             }
-            {al?` · ${al}`:""}
+            {!compact&&al?` · ${al}`:""}
           </p>
         </div>
 
@@ -1057,11 +1057,7 @@ export default function App(){
               <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>Recentes</p>
               <button onClick={()=>nav("hist")} style={{background:"none",border:"none",color:"#38bdf8",fontSize:12}}>ver todos</button>
             </div>
-            {[...confM].sort((a,b)=>{
-              const da=pd(a.atype==="card"&&a.payDate?a.payDate:a.date);
-              const db2=pd(b.atype==="card"&&b.payDate?b.payDate:b.date);
-              return db2-da;
-            }).slice(0,5).map(t=>{
+            {[...confM].sort((a,b)=>pd(b.date)-pd(a.date)).slice(0,5).map(t=>{
               const cat=getCat(t.cat);const isTr=t.isTO||t.isTE;const al=alab(t);
               return<div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:"1px solid #0f172a",opacity:t.paid===false?0.6:1}}>
                 <div style={{width:33,height:33,borderRadius:9,background:isTr?"#1e3a5f":t.type==="receita"?"#064e3b":"#450a0a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{isTr?"↔️":cat.i}</div>
@@ -1559,14 +1555,32 @@ export default function App(){
         {/* ══ CARD DETAIL ══ */}
         {view==="card"&&selC&&(()=>{
           const sp=csp(selC.id),lim=parseFloat(selC.lim)||0,av=lim>0?lim-sp:null,pct=lim>0?Math.min((sp/lim)*100,100):0;
-          const cItems=allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit&&i.real!==false);
+          const cItems=[...allM.filter(i=>i.atype==="card"&&i.aid===selC.id&&!i.isInvoiceCredit&&i.real!==false)].sort((a,b)=>pd(b.date)-pd(a.date));
           const cInst=inst.filter(i=>i.atype==="card"&&i.aid===selC.id);
           const iStat=invStatus(selC,m,y);
           const isPaid=iStat==="paid";
           const isClosed=iStat==="closed";
           const invData=invoices[invKey(selC.id,m,y)];
+          // Check previous month for unpaid closed invoice
+          const prevM=m===0?11:m-1;const prevY=m===0?y-1:y;
+          const prevStat=invStatus(selC,prevM,prevY);
+          const prevSp=tx.filter(t=>{
+            if(t.atype!=="card"||t.aid!==selC.id||t.type!=="despesa"||t.isInvoiceCredit)return false;
+            const payD=t.payDate||cardPayDate(t.date,selC.closing,selC.due);
+            const d=pd(payD);return d.getMonth()===prevM&&d.getFullYear()===prevY;
+          }).reduce((s,t)=>s+t.amt,0);
+          const showPrevAlert=prevStat==="closed"&&prevSp>0;
           return<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:12}}>
             <Hd back={()=>nav("home")} title={`Fatura — ${selC.name}`}/>
+
+            {/* Alert: previous month invoice is unpaid */}
+            {showPrevAlert&&<div onClick={()=>setFilt({m:prevM,y:prevY})} style={{background:"#451a03",border:"1px solid #f59e0b",borderRadius:12,padding:"11px 14px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div>
+                <p style={{fontSize:12,fontWeight:700,color:"#f59e0b"}}>⚠ Fatura de {MS[prevM]} aguardando pagamento</p>
+                <p style={{fontSize:10,color:"#92400e",marginTop:2}}>Toque para ir ao mês anterior e pagar</p>
+              </div>
+              <span style={{color:"#f59e0b",fontSize:14,fontWeight:700}}>{fmt(prevSp)}</span>
+            </div>}
             <div className="vc" style={{background:`linear-gradient(135deg,${selC.color},${selC.color}88)`}}>
               <div style={{position:"absolute",top:-18,right:-18,width:90,height:90,borderRadius:"50%",background:"rgba(255,255,255,.06)"}}/>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -1609,7 +1623,7 @@ export default function App(){
               + Lançar na Fatura
             </button>
             {!cItems.length&&<p style={{textAlign:"center",fontSize:12,color:"#475569",padding:"22px 0"}}>Sem lançamentos neste mês</p>}
-            {cItems.map((t,i)=><TxRow key={t.id||t._fid||i} t={{...t,real:!!t.real}} onE={startE} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover?",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
+            {cItems.map((t,i)=><TxRow key={t.id||t._fid||i} compact t={{...t,real:!!t.real}} onE={startE} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover?",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
           </div>;
         })()}
 
