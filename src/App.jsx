@@ -5,11 +5,14 @@ import { doc, setDoc, getDoc, onSnapshot } from "firebase/firestore";
 
 // ── External modules ───────────────────────────────────────────────────────────
 import { DC, EMOJIS, BCOLS, CCOLS, PCOLS, MS, BICONS, CICONS, FREQS, EB, EC } from "./constants";
-import { fmt, td, pd, adjBiz, cardPayDate, autoOccs, recInMonth, instInMonth } from "./utils";
+import { fmt, td, pd, adjBiz, addF, cardPayDate, autoOccs, recInMonth, instInMonth } from "./utils";
 import { CSS } from "./styles";
 import { Pie, Gauge } from "./components/Charts";
 import { LoginScreen, PinScreen, Loader } from "./components/AuthScreens";
 import { InvPayModal } from "./components/InvPayModal";
+import { AntecipacaoModal } from "./components/AntecipacaoModal";
+import { CashflowChart } from "./components/CashflowChart";
+import { TxDetailDrawer } from "./components/TxDetailDrawer";
 
 // ── Form default & Firestore ───────────────────────────────────────────────────
 const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:"",autoPaid:false});
@@ -73,8 +76,11 @@ export default function App(){
   const [rtab, setRtab]= useState("rec");
   const [dtab, setDtab]= useState("dashs"); // "dashs" | "metas"
   const [epk,  setEpk] = useState(false);
-  const [recEditMdl, setRecEditMdl]= useState(null); // {rec, form} for "só este / seguintes" modal
-  const [invPayMdl,  setInvPayMdl] = useState(null); // {card, month, year, total} for invoice payment
+  const [recEditMdl, setRecEditMdl]= useState(null);
+  const [invPayMdl,  setInvPayMdl] = useState(null);
+  const [antecipMdl, setAntecipMdl]= useState(null); // {ins} for prepayment modal
+  const [histFilter, setHistFilter]= useState({q:"",type:"all",cat:"",atype:""}); // extrato filters
+  const [txDetail,   setTxDetail]  = useState(null);  // transaction open in detail drawer
   const saveTimer      = useRef(null);
   const mainRef        = useRef(null);
   const userRef        = useRef(null); // always current user for use in event handlers
@@ -345,6 +351,21 @@ export default function App(){
     pd(b.date)-pd(a.date)
   ),[confM,fcasts]);
 
+  // Filtered list for extrato view
+  const allMFiltered=useMemo(()=>{
+    const {q,type,cat,atype}=histFilter;
+    return allM.filter(t=>{
+      if(type!=="all"&&t.type!==type)return false;
+      if(cat&&t.cat!==cat)return false;
+      if(atype&&t.atype!==atype)return false;
+      if(q){
+        const ql=q.toLowerCase();
+        if(!t.desc?.toLowerCase().includes(ql)&&!t.note?.toLowerCase().includes(ql))return false;
+      }
+      return true;
+    });
+  },[allM,histFilter]);
+
   // totR/totD: only PAID transactions for "real" balance
   const totR=useMemo(()=>confM.filter(t=>t.type==="receita"&&!t.isTE&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
   const totD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
@@ -376,19 +397,22 @@ export default function App(){
   const visibleBnks=useMemo(()=>bnks.filter(b=>!b.hidden),[bnks]);
   const tbb=useMemo(()=>visibleBnks.reduce((s,b)=>s+bbal(b),0),[visibleBnks,bbal]);
 
-  // csp: total spent on card IN THE CURRENT BILLING CYCLE
-  // Cycle = purchases whose payDate falls in month m/y
-  // This correctly shows what will be billed regardless of purchase month
+  // carry forward: total visible bank balance at start of filtered month
+  const carryBal=useMemo(()=>{
+    const firstDay=new Date(y,m,1);
+    return visibleBnks.reduce((s,b)=>s+bbalUntil(b,firstDay),0);
+  },[visibleBnks,bbalUntil,m,y]);
+
+  // csp: net card spend = despesas minus receitas (estornos/cashback) with payDate in m/y
   const csp=useCallback(cid=>{
     const card=crds.find(c=>c.id===cid);
     if(!card)return 0;
     return tx.filter(t=>{
-      if(t.atype!=="card"||t.aid!==cid||t.type!=="despesa")return false;
-      // Compute payDate for this tx (it may already be stored, or compute it)
+      if(t.atype!=="card"||t.aid!==cid)return false;
       const payD=t.payDate||cardPayDate(t.date,card.closing,card.due);
       const d=pd(payD);
       return d.getMonth()===m&&d.getFullYear()===y;
-    }).reduce((s,t)=>s+t.amt,0);
+    }).reduce((s,t)=>s+(t.type==="despesa"?t.amt:-t.amt),0);
   },[tx,crds,m,y]);
   const alab=useCallback(t=>{
     if(t.atype==="bank"){const b=bnks.find(b=>b.id===t.aid);return b?`${b.icon} ${b.name}`:""; }
@@ -626,6 +650,39 @@ export default function App(){
     setInst(newInst);setTx(newTx);toast$("Removido","#f97316");
     saveNow({inst:newInst,tx:newTx});
   };
+
+  // ── Installment prepayment ──
+  const antecipInst=({ins,parcsToAntecip,bankId,payDate,valorFinal})=>{
+    const tid=Date.now();
+    const bankName=bnksRef.current.find(b=>b.id===bankId)?.name||"conta";
+    // Debit from bank
+    const debit={id:tid,type:"despesa",amt:valorFinal,
+      desc:`⚡ Antecip. ${ins.desc} (${parcsToAntecip.length}x)`,
+      cat:ins.cat,date:payDate,note:"",atype:"bank",aid:bankId,
+      isAntecip:true,instId:ins.id,paid:true};
+    // Mark selected installment tx as paid (materialise if needed)
+    let newTx=[debit,...txRef.current];
+    const parcAmt=ins.tamt/ins.icount;
+    parcsToAntecip.forEach(idx=>{
+      const existing=newTx.find(t=>t.iid===ins.id&&t.iidx===idx);
+      if(existing){
+        newTx=newTx.map(t=>t.iid===ins.id&&t.iidx===idx?{...t,paid:true}:t);
+      } else {
+        // Materialise the future installment as paid
+        const d=pd(ins.startDate);d.setMonth(d.getMonth()+(idx-1));
+        const raw=d.toISOString().split("T")[0];
+        const card=ins.atype==="card"?crdsRef.current.find(c=>c.id==ins.aid):null;
+        const pDate=card?cardPayDate(raw,card.closing,card.due):undefined;
+        newTx=[...newTx,{id:Date.now()+idx,iid:ins.id,iidx:idx,type:ins.type,
+          amt:parcAmt,desc:ins.desc,cat:ins.cat,date:raw,payDate:pDate,
+          note:"",atype:ins.atype,aid:ins.aid,auto:true,paid:true}];
+      }
+    });
+    setTx(newTx);
+    setAntecipMdl(null);
+    toast$(`Antecipação de ${parcsToAntecip.length}x confirmada ✓`);
+    saveNow({tx:newTx});
+  };
   const sBank=()=>{
     const bal=parseFloat(String(bf.bal).replace(",","."));
     if(!bf.name.trim()){toast$("Nome obrigatório","#ef4444");return;}
@@ -740,6 +797,10 @@ export default function App(){
     </div>
   );
 
+  // ── TxRow with swipe gestures ──────────────────────────────────────────────
+  // Tap   → opens TxDetailDrawer
+  // Swipe ← → reveals delete button (80px)
+  // Swipe → → toggle paid (bank only)
   const TxRow=({t,onE,onD,onTogglePaid,onFcastE,compact=false})=>{
     const cat=getCat(t.cat);
     const isTr=t.isTO||t.isTE;
@@ -749,15 +810,11 @@ export default function App(){
     const billingDate=isCard&&t.payDate?t.payDate:null;
     const today=new Date();today.setHours(0,0,0,0);
 
-    // Badge logic:
-    // Card: overdue only if payDate passed AND fatura not paid
-    // Bank: overdue if date passed and still pending
     const isOverdue=t.real&&t.paid===false&&(()=>{
       if(isCard){
         const checkDate=billingDate?pd(billingDate):pd(t.date);
         checkDate.setHours(0,0,0,0);
-        if(checkDate>=today)return false; // not past due yet
-        // Check if the invoice for this billing cycle was already paid
+        if(checkDate>=today)return false;
         if(billingDate){
           const bd=pd(billingDate);
           const iKey=`${t.aid}_${bd.getFullYear()}_${String(bd.getMonth()).padStart(2,"0")}`;
@@ -770,65 +827,131 @@ export default function App(){
       }
     })();
 
-    const showPaidToggle=t.real&&!isTr&&!isCard&&onTogglePaid;
-    const showCardStatus=t.real&&!isTr&&isCard;
+    // ── Swipe state ──
+    const swipeRef=useRef({startX:0,startY:0,offsetX:0,dragging:false,decided:false,isHoriz:false});
+    const elRef=useRef(null);
+    const [offsetX,setOffsetX]=useState(0);
+    const SNAP=80; // px revealed on left swipe
+
+    // Attach touchmove as non-passive so we can call preventDefault
+    useEffect(()=>{
+      const el=elRef.current;if(!el)return;
+      const handler=e=>{
+        const s=swipeRef.current;
+        if(!s.dragging)return;
+        const dx=e.touches[0].clientX-s.startX;
+        const dy=e.touches[0].clientY-s.startY;
+        if(!s.decided){
+          if(Math.abs(dx)<4&&Math.abs(dy)<4)return;
+          s.isHoriz=Math.abs(dx)>Math.abs(dy);
+          s.decided=true;
+        }
+        if(!s.isHoriz)return;
+        e.preventDefault(); // block page scroll only for horizontal swipes
+        const raw=s.offsetX+dx;
+        const clamped=Math.max(-SNAP,Math.min(30,raw));
+        setOffsetX(clamped);
+      };
+      el.addEventListener("touchmove",handler,{passive:false});
+      return()=>el.removeEventListener("touchmove",handler);
+    },[]);
+
+    const onTouchStart=useCallback(e=>{
+      const t2=e.touches[0];
+      swipeRef.current={startX:t2.clientX,startY:t2.clientY,offsetX,dragging:true,decided:false,isHoriz:false};
+    },[offsetX]);
+
+    const onTouchEnd=useCallback(e=>{
+      const s=swipeRef.current;
+      s.dragging=false;
+      if(!s.isHoriz){
+        if(t.real!==false)setTxDetail(t);
+        return;
+      }
+      const dx=e.changedTouches[0].clientX-s.startX;
+      if(dx<-30){setOffsetX(-SNAP);return;}
+      if(dx>30&&!isCard&&!isTr&&onTogglePaid&&t.real){onTogglePaid(t.id);}
+      setOffsetX(0);
+    },[t,isCard,isTr,onTogglePaid]);
+
+    const handleRowClick=useCallback(()=>{
+      if(offsetX!==0){setOffsetX(0);return;}
+      if(t.real!==false)setTxDetail(t);
+    },[offsetX,t]);
 
     return(
-      <div className={`card ${t.real===false?"fc":""} ${!isPaid&&t.real&&!isCard?"unpaid-row":""} ${isOverdue?"overdue-row":""}`}
-        style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px"}}>
-
-        {/* Paid toggle — only for bank transactions */}
-        {showPaidToggle&&(
-          <button onClick={()=>onTogglePaid(t.id)}
-            title={isPaid?"Marcar como pendente":"Confirmar pagamento"}
-            style={{width:24,height:24,borderRadius:"50%",border:`2px solid ${isOverdue?"#ef4444":isPaid?"#34d399":"#f59e0b"}`,background:isPaid?"#064e3b":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontSize:12,color:isPaid?"#34d399":isOverdue?"#ef4444":"#f59e0b"}}>
-            {isPaid?"✓":"!"}
+      <div style={{position:"relative",overflow:"hidden",borderRadius:14,marginBottom:0}}>
+        {/* Action layer behind — revealed by swipe left */}
+        <div style={{position:"absolute",right:0,top:0,bottom:0,width:SNAP,
+          display:"flex",alignItems:"center",justifyContent:"center",
+          background:"#450a0a",borderRadius:"0 14px 14px 0"}}>
+          <button onPointerDown={e=>{e.stopPropagation();if(onD)onD(t.id);setOffsetX(0);}}
+            style={{background:"none",border:"none",color:"#f87171",fontSize:22,cursor:"pointer",
+              display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+            🗑<span style={{fontSize:9,fontWeight:600}}>excluir</span>
           </button>
-        )}
-
-        <div style={{width:36,height:36,borderRadius:10,background:isTr?"#1e3a5f":t.type==="receita"?"#064e3b":"#450a0a",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>
-          {isTr?"↔️":cat.i}
         </div>
 
-        <div style={{flex:1,minWidth:0}}>
-          <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
-            <p style={{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%"}}>{t.desc}</p>
-            {t.iidx&&<span className="bdg" style={{background:"#1e3a5f",color:"#7dd3fc",flexShrink:0}}>{t.iidx}/{t.icount}</span>}
-            {t.auto&&t.rid&&<span className="bdg" style={{background:"#2d1a4f",color:"#c4b5fd",flexShrink:0}}>🔁</span>}
-            {!t.real&&<span className="bdg" style={{background:"#0c2340",color:"#7dd3fc",flexShrink:0}}>🔮</span>}
-            {/* Bank status badges */}
-            {!isCard&&!isTr&&t.real&&!isPaid&&!isOverdue&&<span className="bdg" style={{background:"#451a03",color:"#f59e0b",flexShrink:0}}>pendente</span>}
-            {!isCard&&!isTr&&t.real&&isOverdue&&<span className="bdg" style={{background:"#450a0a",color:"#ef4444",flexShrink:0}}>atrasado</span>}
-            {/* Card fatura overdue badge */}
-            {showCardStatus&&isOverdue&&<span className="bdg" style={{background:"#450a0a",color:"#ef4444",flexShrink:0}}>fatura atrasada</span>}
+        {/* Main row — slides left/right */}
+        <div ref={elRef}
+          className={`card ${t.real===false?"fc":""} ${!isPaid&&t.real&&!isCard?"unpaid-row":""} ${isOverdue?"overdue-row":""}`}
+          style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px",
+            transform:`translateX(${offsetX}px)`,
+            transition:swipeRef.current.dragging?"none":"transform .2s ease",
+            cursor:"pointer",userSelect:"none",WebkitUserSelect:"none",
+            position:"relative",zIndex:1}}
+          onClick={handleRowClick}
+          onTouchStart={onTouchStart}
+          onTouchEnd={onTouchEnd}>
+
+          {/* Paid indicator dot — bank only */}
+          {!isCard&&!isTr&&t.real&&(
+            <div style={{width:6,height:6,borderRadius:"50%",flexShrink:0,
+              background:isPaid?(isOverdue?"#ef4444":"#34d399"):"#f59e0b"}}/>
+          )}
+
+          <div style={{width:36,height:36,borderRadius:10,
+            background:isTr?"#1e3a5f":t.type==="receita"?"#064e3b":"#450a0a",
+            display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>
+            {isTr?"↔️":cat.i}
           </div>
-          <p style={{fontSize:10,color:"#64748b",marginTop:1}}>
-            {compact
-              ? pd(t.date).toLocaleDateString("pt-BR")
-              : billingDate
-                ? <><span>compra {pd(t.date).toLocaleDateString("pt-BR")}</span><span style={{color:isOverdue?"#ef4444":"#64748b"}}> · venc {pd(billingDate).toLocaleDateString("pt-BR")}</span></>
-                : pd(t.date).toLocaleDateString("pt-BR")
-            }
-            {!compact&&al?` · ${al}`:""}
-          </p>
-        </div>
 
-        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:5,flexShrink:0}}>
-          <span style={{fontWeight:700,fontSize:13,color:t.type==="receita"?"#34d399":"#f87171"}}>
-            {t.type==="receita"?"+":"-"}{fmt(t.amt)}
-          </span>
-          {/* Edit button for pending/forecast */}
-          {!t.real&&onFcastE&&(t.isRF)&&(
-            <button onClick={()=>onFcastE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>
-          )}
-          {/* Edit/delete for ALL real non-transfer transactions */}
-          {t.real&&!isTr&&(
-            <div style={{display:"flex",gap:5}}>
-              {onE&&<button onClick={()=>onE(t)} className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>}
-              <button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+              <p style={{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",
+                whiteSpace:"nowrap",maxWidth:"100%"}}>{t.desc}</p>
+              {t.iidx&&<span className="bdg" style={{background:"#1e3a5f",color:"#7dd3fc",flexShrink:0}}>{t.iidx}/{t.icount}</span>}
+              {t.auto&&t.rid&&<span className="bdg" style={{background:"#2d1a4f",color:"#c4b5fd",flexShrink:0}}>🔁</span>}
+              {!t.real&&<span className="bdg" style={{background:"#0c2340",color:"#7dd3fc",flexShrink:0}}>🔮</span>}
+              {!isCard&&!isTr&&t.real&&!isPaid&&!isOverdue&&<span className="bdg" style={{background:"#451a03",color:"#f59e0b",flexShrink:0}}>pendente</span>}
+              {!isCard&&!isTr&&t.real&&isOverdue&&<span className="bdg" style={{background:"#450a0a",color:"#ef4444",flexShrink:0}}>atrasado</span>}
+              {t.real&&isCard&&isOverdue&&<span className="bdg" style={{background:"#450a0a",color:"#ef4444",flexShrink:0}}>fatura atrasada</span>}
             </div>
-          )}
-          {t.real&&isTr&&<button onClick={()=>onD(t.id)} className="ab" style={{background:"#450a0a",color:"#f87171"}}>×</button>}
+            <p style={{fontSize:10,color:"#64748b",marginTop:1}}>
+              {compact
+                ? pd(t.date).toLocaleDateString("pt-BR")
+                : billingDate
+                  ? <><span>compra {pd(t.date).toLocaleDateString("pt-BR")}</span><span style={{color:isOverdue?"#ef4444":"#64748b"}}> · venc {pd(billingDate).toLocaleDateString("pt-BR")}</span></>
+                  : pd(t.date).toLocaleDateString("pt-BR")
+              }
+              {!compact&&al?` · ${al}`:""}
+            </p>
+          </div>
+
+          <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0}}>
+            <span style={{fontWeight:700,fontSize:13,color:t.type==="receita"?"#34d399":"#f87171"}}>
+              {t.type==="receita"?"+":"-"}{fmt(t.amt)}
+            </span>
+            {/* Forecast edit button */}
+            {!t.real&&onFcastE&&t.isRF&&(
+              <button onPointerDown={e=>{e.stopPropagation();onFcastE(t);}}
+                className="ab" style={{background:"#1e3a5f",color:"#38bdf8"}}>editar</button>
+            )}
+            {/* Swipe hint on real items */}
+            {t.real&&offsetX===0&&(
+              <span style={{fontSize:9,color:"#334155"}}>←</span>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -945,6 +1068,36 @@ export default function App(){
         }}
       />}
 
+      {/* ── Antecipação Modal ── */}
+      {antecipMdl&&<AntecipacaoModal
+        ins={antecipMdl.ins}
+        tx={tx}
+        bnks={bnks}
+        bbal={bbal}
+        crds={crds}
+        cardPayDate={cardPayDate}
+        pd={pd}
+        onCancel={()=>setAntecipMdl(null)}
+        onConfirm={({parcsToAntecip,bankId,payDate,valorFinal,desconto})=>
+          antecipInst({ins:antecipMdl.ins,parcsToAntecip,bankId,payDate,valorFinal})}
+      />}
+
+      {/* ── Transaction Detail Drawer ── */}
+      {txDetail&&<TxDetailDrawer
+        t={txDetail}
+        cats={cats}
+        bnks={bnks}
+        crds={crds}
+        invoices={invoices}
+        fmt={fmt}
+        pd={pd}
+        MS={MS}
+        onClose={()=>setTxDetail(null)}
+        onEdit={t=>{startE(t);}}
+        onDelete={id=>setMdl({title:"Remover lançamento?",body:"Esta ação não pode ser desfeita.",danger:true,btn:"Remover",action:()=>dTx(id)})}
+        onTogglePaid={togglePaid}
+      />}
+
       <div style={{padding:"calc(14px + env(safe-area-inset-top)) 18px 0",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0f172a",position:"sticky",top:0,zIndex:10}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           {user?.photoURL&&<img src={user.photoURL} style={{width:28,height:28,borderRadius:"50%",flexShrink:0}} alt="" referrerPolicy="no-referrer"/>}
@@ -975,10 +1128,19 @@ export default function App(){
                 <p style={{fontSize:20,fontWeight:700,color:saldoP>=0?"#7dd3fc":"#fca5a5",fontFamily:"'DM Mono',monospace"}}>{fmt(saldoP)}</p>
               </div></>}
             </div>
-            <div style={{display:"flex",gap:14,marginTop:12,flexWrap:"wrap"}}>
+            {/* Carry forward row */}
+            {visibleBnks.length>0&&<div style={{display:"flex",alignItems:"center",gap:6,marginTop:8,paddingTop:8,borderTop:"1px solid #1e3a5f"}}>
+              <span style={{fontSize:9,color:"#64748b"}}>Saldo anterior</span>
+              <span style={{fontSize:11,fontWeight:600,color:"#64748b",fontFamily:"'DM Mono',monospace"}}>{fmt(carryBal)}</span>
+              <span style={{fontSize:9,color:"#334155",margin:"0 2px"}}>+</span>
+              <span style={{fontSize:9,color:"#64748b"}}>entradas</span>
+              <span style={{fontSize:9,color:"#334155",margin:"0 2px"}}>=</span>
+              <span style={{fontSize:11,fontWeight:700,color:tbb>=0?"#38bdf8":"#f87171",fontFamily:"'DM Mono',monospace"}}>{fmt(tbb)}</span>
+              <span style={{fontSize:9,color:"#64748b"}}>nos bancos</span>
+            </div>}
+            <div style={{display:"flex",gap:14,marginTop:10,flexWrap:"wrap"}}>
               <div><p style={{fontSize:9,color:"#94a3b8"}}>↑ Receitas</p><p style={{fontSize:13,fontWeight:600,color:"#34d399"}}>{fmt(totR)}</p></div>
               <div><p style={{fontSize:9,color:"#94a3b8"}}>↓ Despesas</p><p style={{fontSize:13,fontWeight:600,color:"#f87171"}}>{fmt(totD)}</p></div>
-              {tbb>0&&<div><p style={{fontSize:9,color:"#94a3b8"}}>🏦 Bancos</p><p style={{fontSize:13,fontWeight:600,color:"#38bdf8"}}>{fmt(tbb)}</p></div>}
               {(pendD>0||pendR>0)&&<div><p style={{fontSize:9,color:"#94a3b8"}}>⏳ Pendente</p><p style={{fontSize:13,fontWeight:600,color:"#f59e0b"}}>{pendD>0?`-${fmt(pendD)}`:`+${fmt(pendR)}`}</p></div>}
             </div>
           </div>
@@ -1112,6 +1274,12 @@ export default function App(){
           </>}
 
           {dtab==="dashs"&&<>
+          {/* Cashflow timeline */}
+          {visibleBnks.length>0&&<div className="card">
+            <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5,marginBottom:12}}>📈 Cashflow — {MS[m]}/{y}</p>
+            <CashflowChart tx={tx} bnks={visibleBnks} crds={crds} m={m} y={y}
+              cardPayDate={cardPayDate} pd={pd} fmt={fmt}/>
+          </div>}
           <div className="card">
             <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5,marginBottom:12}}>Saúde Hoje — Dia {dayN}/{daysM}</p>
             <div style={{display:"flex",gap:14,flexWrap:"wrap",justifyContent:"space-around",alignItems:"center"}}>
@@ -1260,13 +1428,17 @@ export default function App(){
               if(!card)return null;
               const adj=adjBiz(form.date,form.bday||"ignore");
               const pay=cardPayDate(adj,card.closing,card.due);
-              return<div style={{background:"#0f172a",borderRadius:10,padding:"9px 13px",border:"1px solid #334155"}}>
-                <p style={{fontSize:10,color:"#94a3b8",marginBottom:3,fontWeight:600}}>VENCIMENTO NO CARTÃO</p>
+              const isCredit=form.type==="receita";
+              return<div style={{background:"#0f172a",borderRadius:10,padding:"9px 13px",border:`1px solid ${isCredit?"#064e3b":"#334155"}`}}>
+                <p style={{fontSize:10,color:isCredit?"#34d399":"#94a3b8",marginBottom:3,fontWeight:600}}>
+                  {isCredit?"✅ CRÉDITO NA FATURA":"VENCIMENTO NO CARTÃO"}
+                </p>
                 <div style={{display:"flex",justifyContent:"space-between"}}>
-                  <div><p style={{fontSize:9,color:"#64748b"}}>Compra</p><p style={{fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{pd(adj).toLocaleDateString("pt-BR")}</p></div>
-                  <div style={{color:"#38bdf8",fontSize:16,alignSelf:"center"}}>→</div>
-                  <div style={{textAlign:"right"}}><p style={{fontSize:9,color:"#64748b"}}>Pagamento</p><p style={{fontSize:12,fontWeight:600,color:"#38bdf8"}}>{pd(pay).toLocaleDateString("pt-BR")}</p></div>
+                  <div><p style={{fontSize:9,color:"#64748b"}}>{isCredit?"Data do crédito":"Compra"}</p><p style={{fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{pd(adj).toLocaleDateString("pt-BR")}</p></div>
+                  <div style={{color:isCredit?"#34d399":"#38bdf8",fontSize:16,alignSelf:"center"}}>→</div>
+                  <div style={{textAlign:"right"}}><p style={{fontSize:9,color:"#64748b"}}>{isCredit?"Fatura de":"Pagamento"}</p><p style={{fontSize:12,fontWeight:600,color:isCredit?"#34d399":"#38bdf8"}}>{pd(pay).toLocaleDateString("pt-BR")}</p></div>
                 </div>
+                {isCredit&&<p style={{fontSize:9,color:"#64748b",marginTop:4}}>Reduz o valor da fatura neste ciclo</p>}
               </div>;
             })()}
 
@@ -1335,8 +1507,62 @@ export default function App(){
         {/* ══ HIST ══ */}
         {view==="hist"&&<div className="si" style={{padding:"12px 18px",display:"flex",flexDirection:"column",gap:11}}>
           <Hd back={()=>nav("home")} title={`Extrato — ${MS[m]}/${y}`}/>
-          {allM.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:"#475569"}}><p style={{fontSize:13}}>Nenhum lançamento este mês</p></div>}
-          {allM.map((t,i)=><TxRow key={t.id||t._fid||i} t={{...t,real:!!t.real}} onE={startE} onFcastE={startFcastE} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover lançamento?",body:"Esta ação não pode ser desfeita.",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
+
+          {/* Search bar */}
+          <div style={{position:"relative"}}>
+            <span style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",fontSize:14,color:"#475569",pointerEvents:"none"}}>🔍</span>
+            <input className="fi" placeholder="Buscar lançamentos…" value={histFilter.q}
+              onChange={e=>setHistFilter(f=>({...f,q:e.target.value}))}
+              style={{paddingLeft:34,fontSize:14}}/>
+            {histFilter.q&&<button onClick={()=>setHistFilter(f=>({...f,q:""}))}
+              style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:"#64748b",fontSize:16}}>×</button>}
+          </div>
+
+          {/* Filter chips */}
+          <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:2,scrollbarWidth:"none"}}>
+            {[
+              {key:"type",val:"all",  label:"Todos"},
+              {key:"type",val:"receita", label:"↑ Receitas"},
+              {key:"type",val:"despesa", label:"↓ Despesas"},
+            ].map(chip=>(
+              <button key={chip.val} onClick={()=>setHistFilter(f=>({...f,type:chip.val}))}
+                style={{flexShrink:0,padding:"5px 11px",borderRadius:99,border:"1.5px solid",fontSize:11,fontWeight:600,whiteSpace:"nowrap",
+                  borderColor:histFilter.type===chip.val?"#38bdf8":"#334155",
+                  background:histFilter.type===chip.val?"#0c1e2e":"transparent",
+                  color:histFilter.type===chip.val?"#38bdf8":"#64748b"}}>
+                {chip.label}
+              </button>
+            ))}
+            {/* Account filter chips */}
+            {bnks.length>0&&<button onClick={()=>setHistFilter(f=>({...f,atype:f.atype==="bank"?"":"bank"}))}
+              style={{flexShrink:0,padding:"5px 11px",borderRadius:99,border:"1.5px solid",fontSize:11,fontWeight:600,
+                borderColor:histFilter.atype==="bank"?"#38bdf8":"#334155",
+                background:histFilter.atype==="bank"?"#0c1e2e":"transparent",
+                color:histFilter.atype==="bank"?"#38bdf8":"#64748b"}}>🏦 Banco</button>}
+            {crds.length>0&&<button onClick={()=>setHistFilter(f=>({...f,atype:f.atype==="card"?"":"card"}))}
+              style={{flexShrink:0,padding:"5px 11px",borderRadius:99,border:"1.5px solid",fontSize:11,fontWeight:600,
+                borderColor:histFilter.atype==="card"?"#818cf8":"#334155",
+                background:histFilter.atype==="card"?"#1e1b4b":"transparent",
+                color:histFilter.atype==="card"?"#818cf8":"#64748b"}}>💳 Cartão</button>}
+            {/* Active filter clear */}
+            {(histFilter.type!=="all"||histFilter.cat||histFilter.atype||histFilter.q)&&(
+              <button onClick={()=>setHistFilter({q:"",type:"all",cat:"",atype:""})}
+                style={{flexShrink:0,padding:"5px 11px",borderRadius:99,border:"1.5px solid #ef4444",fontSize:11,fontWeight:600,color:"#ef4444",background:"transparent"}}>
+                ✕ Limpar
+              </button>
+            )}
+          </div>
+
+          {/* Results count */}
+          {(histFilter.type!=="all"||histFilter.cat||histFilter.atype||histFilter.q)&&(
+            <p style={{fontSize:11,color:"#64748b"}}>{allMFiltered.length} resultado{allMFiltered.length!==1?"s":""}</p>
+          )}
+
+          {allMFiltered.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:"#475569"}}>
+            <p style={{fontSize:24,marginBottom:8}}>{histFilter.q||histFilter.type!=="all"?"🔍":"📋"}</p>
+            <p style={{fontSize:13}}>{histFilter.q||histFilter.type!=="all"?"Nenhum resultado encontrado":"Nenhum lançamento este mês"}</p>
+          </div>}
+          {allMFiltered.map((t,i)=><TxRow key={t.id||t._fid||i} t={{...t,real:!!t.real}} onE={startE} onFcastE={startFcastE} onTogglePaid={t.real&&!t.isTO&&!t.isTE?togglePaid:null} onD={id=>setMdl({title:"Remover lançamento?",body:"Esta ação não pode ser desfeita.",danger:true,btn:"Remover",action:()=>dTx(id)})}/>)}
         </div>}
 
         {/* ══ REC ══ */}
@@ -1396,7 +1622,13 @@ export default function App(){
                   <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>RESTANTES</p><p style={{fontSize:13,fontWeight:700,color:rem>0?"#f87171":"#34d399"}}>{rem}</p><p style={{fontSize:9,color:"#475569"}}>{fmt(rem*(ins.tamt/ins.icount))}</p></div>
                   <div style={{textAlign:"center"}}><p style={{fontSize:9,color:"#64748b"}}>TOTAL</p><p style={{fontSize:13,fontWeight:700}}>{ins.icount}x</p><p style={{fontSize:9,color:"#475569"}}>{fmt(ins.tamt)}</p></div>
                 </div>
-                <button onClick={()=>setMdl({title:"Remover parcelamento?",body:"Remove o modelo e todos os lançamentos gerados.",danger:true,btn:"Remover",action:()=>dInst(ins.id)})} className="ab" style={{background:"#450a0a",color:"#f87171",width:"100%",padding:"9px",textAlign:"center"}}>× remover parcelamento</button>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setAntecipMdl({ins})} className="ab"
+                    style={{flex:1,background:"#1e1b4b",color:"#818cf8",padding:"9px",textAlign:"center"}}>
+                    ⚡ Antecipar
+                  </button>
+                  <button onClick={()=>setMdl({title:"Remover parcelamento?",body:"Remove o modelo e todos os lançamentos gerados.",danger:true,btn:"Remover",action:()=>dInst(ins.id)})} className="ab" style={{flex:1,background:"#450a0a",color:"#f87171",padding:"9px",textAlign:"center"}}>× Remover</button>
+                </div>
               </div>;
             })}
           </>}
