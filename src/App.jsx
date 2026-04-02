@@ -880,14 +880,18 @@ export default function App(){
     },[offsetX,t]);
 
     return(
-      <div style={{position:"relative",overflow:"hidden",borderRadius:14,marginBottom:0}}>
-        {/* Action layer behind — revealed by swipe left */}
+      <div style={{position:"relative",borderRadius:14,marginBottom:0}}>
+        {/* Action layer — always present, visible only when swiped */}
         <div style={{position:"absolute",right:0,top:0,bottom:0,width:SNAP,
           display:"flex",alignItems:"center",justifyContent:"center",
-          background:"#450a0a",borderRadius:"0 14px 14px 0"}}>
+          background:"#450a0a",borderRadius:"0 14px 14px 0",
+          opacity:offsetX<-10?1:0,
+          pointerEvents:offsetX<-40?"auto":"none",
+          transition:"opacity .15s"}}>
           <button onPointerDown={e=>{e.stopPropagation();if(onD)onD(t.id);setOffsetX(0);}}
             style={{background:"none",border:"none",color:"#f87171",fontSize:22,cursor:"pointer",
-              display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+              display:"flex",flexDirection:"column",alignItems:"center",gap:2,
+              padding:"12px 16px"}}>
             🗑<span style={{fontSize:9,fontWeight:600}}>excluir</span>
           </button>
         </div>
