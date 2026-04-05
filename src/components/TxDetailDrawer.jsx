@@ -29,7 +29,7 @@ export function TxDetailDrawer({t,cats,bnks,crds,invoices,fmt,pd,MS,onClose,onEd
   );
 
   return(
-    <div style={{position:"fixed",inset:0,zIndex:999,display:"flex",flexDirection:"column",justifyContent:"flex-end"}}
+    <div style={{position:"fixed",inset:0,zIndex:50,display:"flex",flexDirection:"column",justifyContent:"flex-end"}}
       onClick={onClose}>
       {/* Backdrop */}
       <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.7)"}}/>

@@ -373,20 +373,24 @@ export default function App(){
     });
   },[allM,histFilter]);
 
-  // totR/totD: only PAID transactions for "real" balance
-  const totR=useMemo(()=>confM.filter(t=>t.type==="receita"&&!t.isTE&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
-  const totD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
+  // Saldo Real = pago + pendentes (tudo que já está no mês, confirmado ou não)
+  const totR=useMemo(()=>confM.filter(t=>t.type==="receita"&&!t.isTE).reduce((s,t)=>s+t.amt,0),[confM]);
+  const totD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO).reduce((s,t)=>s+t.amt,0),[confM]);
   const saldo=totR-totD;
-  // pending (unpaid) totals
+  // paid-only subtotals (for bank balance calculations)
+  const totRPaid=useMemo(()=>confM.filter(t=>t.type==="receita"&&!t.isTE&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
+  const totDPaid=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO&&t.paid!==false).reduce((s,t)=>s+t.amt,0),[confM]);
+  // pending subtotals (for display)
   const pendR=useMemo(()=>confM.filter(t=>t.type==="receita"&&!t.isTE&&t.paid===false).reduce((s,t)=>s+t.amt,0),[confM]);
   const pendD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO&&t.paid===false).reduce((s,t)=>s+t.amt,0),[confM]);
 
+  // Saldo Previsto = Saldo Real + fcasts futuros ainda não materializados
   const fcR=useMemo(()=>fcasts.filter(f=>f.type==="receita").reduce((s,f)=>s+f.amt,0),[fcasts]);
   const fcD=useMemo(()=>fcasts.filter(f=>f.type==="despesa").reduce((s,f)=>s+f.amt,0),[fcasts]);
-  const saldoP=(totR+fcR+pendR)-(totD+fcD+pendD);
+  const saldoP=saldo+(fcR-fcD);
 
   const catD=useMemo(()=>confM.filter(t=>t.type==="despesa"&&!t.isTO&&t.paid!==false).reduce((a,t)=>{a[t.cat]=(a[t.cat]||0)+t.amt;return a;},{}),[confM]);
-  const catDF=useMemo(()=>[...confM.filter(t=>t.type==="despesa"&&!t.isTO&&t.paid!==false),...fcasts.filter(f=>f.type==="despesa")].reduce((a,t)=>{a[t.cat]=(a[t.cat]||0)+t.amt;return a;},{}),[confM,fcasts]);
+  const catDF=useMemo(()=>[...confM.filter(t=>t.type==="despesa"&&!t.isTO),...fcasts.filter(f=>f.type==="despesa")].reduce((a,t)=>{a[t.cat]=(a[t.cat]||0)+t.amt;return a;},{}),[confM,fcasts]);
 
   // bbal: only paid bank transactions (hidden accounts still tracked separately)
   const bbal=useCallback(b=>{
@@ -440,9 +444,9 @@ export default function App(){
     const e=Object.entries(catD).filter(([,v])=>v>0);
     const sl=e.map(([id,v],i)=>({l:getCat(id).l,i:getCat(id).i,v,c:PCOLS[i%PCOLS.length]}));
     const used=e.reduce((s,[,v])=>s+v,0);
-    if(totR>used)sl.push({l:"Livre",v:totR-used,c:"#1e3a5f"});
+    if(totRPaid>used)sl.push({l:"Livre",v:totRPaid-used,c:"#1e3a5f"});
     return sl;
-  },[catD,totR,getCat]);
+  },[catD,totRPaid,getCat]);
   const prevPie=useMemo(()=>{
     const e=Object.entries(catDF).filter(([,v])=>v>0);
     const sl=e.map(([id,v],i)=>({l:getCat(id).l,v,c:PCOLS[i%PCOLS.length]}));
@@ -450,7 +454,7 @@ export default function App(){
     if(tot>used)sl.push({l:"Livre",v:tot-used,c:"#1e3a5f"});
     return sl;
   },[catDF,totR,fcR,getCat]);
-  const riskP=useMemo(()=>(totR+fcR)>0?(totD+fcD)/(totR+fcR):0,[totR,totD,fcR,fcD]);
+  const riskP=useMemo(()=>(totRPaid+fcR)>0?(totDPaid+fcD)/(totRPaid+fcR):0,[totRPaid,totDPaid,fcR,fcD]);
   const daysM=new Date(y,m+1,0).getDate();
   const dayN=m===NOW.getMonth()&&y===NOW.getFullYear()?NOW.getDate():daysM;
 
@@ -844,12 +848,11 @@ export default function App(){
     })();
 
     // ── Swipe state ──
-    const swipeRef=useRef({startX:0,startY:0,offsetX:0,dragging:false,decided:false,isHoriz:false});
+    const swipeRef=useRef({startX:0,startY:0,offsetX:0,dragging:false,decided:false,isHoriz:false,moved:false});
     const elRef=useRef(null);
     const [offsetX,setOffsetX]=useState(0);
-    const SNAP=80; // px revealed on left swipe
+    const SNAP=80;
 
-    // Attach touchmove as non-passive so we can call preventDefault
     useEffect(()=>{
       const el=elRef.current;if(!el)return;
       const handler=e=>{
@@ -858,12 +861,14 @@ export default function App(){
         const dx=e.touches[0].clientX-s.startX;
         const dy=e.touches[0].clientY-s.startY;
         if(!s.decided){
-          if(Math.abs(dx)<4&&Math.abs(dy)<4)return;
-          s.isHoriz=Math.abs(dx)>Math.abs(dy);
+          // Use larger threshold (8px) to avoid accidental swipe detection
+          if(Math.abs(dx)<8&&Math.abs(dy)<8)return;
+          s.isHoriz=Math.abs(dx)>Math.abs(dy)*1.5; // stronger angle check
           s.decided=true;
         }
         if(!s.isHoriz)return;
-        e.preventDefault(); // block page scroll only for horizontal swipes
+        e.preventDefault();
+        s.moved=true;
         const raw=s.offsetX+dx;
         const clamped=Math.max(-SNAP,Math.min(30,raw));
         setOffsetX(clamped);
@@ -873,24 +878,29 @@ export default function App(){
     },[]);
 
     const onTouchStart=useCallback(e=>{
-      const t2=e.touches[0];
-      swipeRef.current={startX:t2.clientX,startY:t2.clientY,offsetX,dragging:true,decided:false,isHoriz:false};
+      const touch=e.touches[0];
+      swipeRef.current={startX:touch.clientX,startY:touch.clientY,offsetX,dragging:true,decided:false,isHoriz:false,moved:false};
     },[offsetX]);
 
     const onTouchEnd=useCallback(e=>{
       const s=swipeRef.current;
       s.dragging=false;
-      if(!s.isHoriz){
-        if(t.real!==false)setTxDetail(t);
+      // If it was a swipe (moved horizontally), never open the drawer
+      if(s.moved||s.isHoriz){
+        const dx=e.changedTouches[0].clientX-s.startX;
+        if(dx<-30){setOffsetX(-SNAP);return;}
+        if(dx>30&&!isCard&&!isTr&&onTogglePaid&&t.real){onTogglePaid(t.id);}
+        setOffsetX(0);
         return;
       }
-      const dx=e.changedTouches[0].clientX-s.startX;
-      if(dx<-30){setOffsetX(-SNAP);return;}
-      if(dx>30&&!isCard&&!isTr&&onTogglePaid&&t.real){onTogglePaid(t.id);}
-      setOffsetX(0);
-    },[t,isCard,isTr,onTogglePaid]);
+      // Pure tap — open drawer only if panel is closed
+      if(offsetX!==0){setOffsetX(0);return;}
+      if(t.real!==false)setTxDetail(t);
+    },[t,isCard,isTr,onTogglePaid,offsetX]);
 
-    const handleRowClick=useCallback(()=>{
+    const handleRowClick=useCallback(e=>{
+      // onClick fires after touchend on mobile — skip if swipe was detected
+      if(swipeRef.current.moved){return;}
       if(offsetX!==0){setOffsetX(0);return;}
       if(t.real!==false)setTxDetail(t);
     },[offsetX,t]);
@@ -1151,29 +1161,29 @@ export default function App(){
           <div style={{background:"linear-gradient(135deg,#1e3a5f,#1e293b)",borderRadius:20,padding:18,border:"1px solid #2d4a6b"}}>
             <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-end"}}>
               <div>
-                <p style={{fontSize:10,color:"#94a3b8",fontWeight:600,letterSpacing:.5}}>SALDO REAL</p>
+                <p style={{fontSize:10,color:"#94a3b8",fontWeight:600,letterSpacing:.5}}>SALDO DO MÊS</p>
                 <p style={{fontSize:30,fontWeight:700,color:saldo>=0?"#34d399":"#f87171",fontFamily:"'DM Mono',monospace",letterSpacing:-1}}>{fmt(saldo)}</p>
               </div>
-              {(fcasts.length>0||pendD>0||pendR>0)&&<><div style={{width:1,background:"#334155",alignSelf:"stretch"}}/>
+              {fcasts.length>0&&<><div style={{width:1,background:"#334155",alignSelf:"stretch"}}/>
               <div>
-                <p style={{fontSize:10,color:"#94a3b8",fontWeight:600,letterSpacing:.5}}>PREVISTO</p>
+                <p style={{fontSize:10,color:"#94a3b8",fontWeight:600,letterSpacing:.5}}>PREVISTO FIM DO MÊS</p>
                 <p style={{fontSize:20,fontWeight:700,color:saldoP>=0?"#7dd3fc":"#fca5a5",fontFamily:"'DM Mono',monospace"}}>{fmt(saldoP)}</p>
               </div></>}
             </div>
             {/* Carry forward row */}
             {visibleBnks.length>0&&<div style={{display:"flex",alignItems:"center",gap:6,marginTop:8,paddingTop:8,borderTop:"1px solid #1e3a5f"}}>
-              <span style={{fontSize:9,color:"#64748b"}}>Saldo anterior</span>
+              <span style={{fontSize:9,color:"#64748b"}}>Anterior</span>
               <span style={{fontSize:11,fontWeight:600,color:"#64748b",fontFamily:"'DM Mono',monospace"}}>{fmt(carryBal)}</span>
-              <span style={{fontSize:9,color:"#334155",margin:"0 2px"}}>+</span>
-              <span style={{fontSize:9,color:"#64748b"}}>entradas</span>
-              <span style={{fontSize:9,color:"#334155",margin:"0 2px"}}>=</span>
+              <span style={{fontSize:9,color:"#334155",margin:"0 2px"}}>→</span>
               <span style={{fontSize:11,fontWeight:700,color:tbb>=0?"#38bdf8":"#f87171",fontFamily:"'DM Mono',monospace"}}>{fmt(tbb)}</span>
               <span style={{fontSize:9,color:"#64748b"}}>nos bancos</span>
             </div>}
             <div style={{display:"flex",gap:14,marginTop:10,flexWrap:"wrap"}}>
               <div><p style={{fontSize:9,color:"#94a3b8"}}>↑ Receitas</p><p style={{fontSize:13,fontWeight:600,color:"#34d399"}}>{fmt(totR)}</p></div>
               <div><p style={{fontSize:9,color:"#94a3b8"}}>↓ Despesas</p><p style={{fontSize:13,fontWeight:600,color:"#f87171"}}>{fmt(totD)}</p></div>
-              {(pendD>0||pendR>0)&&<div><p style={{fontSize:9,color:"#94a3b8"}}>⏳ Pendente</p><p style={{fontSize:13,fontWeight:600,color:"#f59e0b"}}>{pendD>0?`-${fmt(pendD)}`:`+${fmt(pendR)}`}</p></div>}
+              {pendD>0&&<div><p style={{fontSize:9,color:"#94a3b8"}}>⏳ A pagar</p><p style={{fontSize:13,fontWeight:600,color:"#f59e0b"}}>{fmt(pendD)}</p></div>}
+              {pendR>0&&<div><p style={{fontSize:9,color:"#94a3b8"}}>⏳ A receber</p><p style={{fontSize:13,fontWeight:600,color:"#34d399",opacity:.7}}>{fmt(pendR)}</p></div>}
+              {(fcD>0||fcR>0)&&<div><p style={{fontSize:9,color:"#94a3b8"}}>🔮 Prev.</p><p style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{fmt(fcR-fcD)}</p></div>}
             </div>
           </div>
 
@@ -1954,7 +1964,7 @@ export default function App(){
       </div>{/* end scrollable */}
 
       {/* ── Bottom Nav ── */}
-      <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"#1e293b",borderTop:"1px solid #2d3748",display:"flex",paddingTop:6,paddingBottom:"calc(8px + env(safe-area-inset-bottom))"}}>
+      <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"#1e293b",borderTop:"1px solid #2d3748",display:"flex",paddingTop:6,paddingBottom:"calc(8px + env(safe-area-inset-bottom))",zIndex:60}}>
         {[
           {id:"home",     label:"Início",   icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>},
           {id:"dashs",    label:"Dashs",    icon:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="9"/><path d="M12 12L8.5 8.5"/><path d="M12 7v1M17 12h-1M12 17v-1M7 12h1"/></svg>},
