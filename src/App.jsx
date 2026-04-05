@@ -316,17 +316,22 @@ export default function App(){
   const {m,y}=filt;
   const NOW=useMemo(()=>new Date(),[]);
 
-  // confM: for card transactions use payDate (billing month), for banks use date
+  // hiddenBankIds: set of bank ids marked as hidden (investment accounts)
+  const hiddenBankIds=useMemo(()=>new Set(bnks.filter(b=>b.hidden).map(b=>b.id)),[bnks]);
+
+  // confM: transactions in the filtered month, excluding hidden bank accounts
   const confM=useMemo(()=>tx.filter(t=>{
+    if(t.atype==="bank"&&hiddenBankIds.has(t.aid))return false;
     const filterDate=t.atype==="card"&&t.payDate?t.payDate:t.date;
     const d=pd(filterDate);
     return d.getMonth()===m&&d.getFullYear()===y;
-  }),[tx,m,y]);
+  }),[tx,m,y,hiddenBankIds]);
 
   const fcasts=useMemo(()=>{
     const items=[];
     const isFutureMonth=(new Date(y,m,1))>new Date(NOW.getFullYear(),NOW.getMonth(),1);
     for(const tpl of rec){if(!tpl.freq||tpl.freq==="none")continue;
+      if(tpl.atype==="bank"&&hiddenBankIds.has(tpl.aid))continue;
       for(const o of recInMonth(tpl,m,y)){
         const d=pd(o.date);
         // Current month: only show items not yet happened today
@@ -340,6 +345,7 @@ export default function App(){
       }
     }
     for(const ins of inst){
+      if(ins.atype==="bank"&&hiddenBankIds.has(ins.aid))continue;
       for(const o of instInMonth(ins,m,y)){
         const d=pd(o.date);
         if(!isFutureMonth&&d<=NOW)continue;
@@ -352,7 +358,7 @@ export default function App(){
       }
     }
     return items.sort((a,b)=>pd(a.date)-pd(b.date));
-  },[rec,inst,tx,m,y,NOW,crds]);
+  },[rec,inst,tx,m,y,NOW,crds,hiddenBankIds]);
 
   const allM=useMemo(()=>[...confM.map(t=>({...t,real:true})),...fcasts].sort((a,b)=>
     pd(b.date)-pd(a.date)
