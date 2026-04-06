@@ -13,10 +13,9 @@ import { InvPayModal } from "./components/InvPayModal";
 import { AntecipacaoModal } from "./components/AntecipacaoModal";
 import { CashflowChart } from "./components/CashflowChart";
 import { TxDetailDrawer } from "./components/TxDetailDrawer";
-import { SplitModal } from "./components/SplitModal";
 
 // ── Form default & Firestore ───────────────────────────────────────────────────
-const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:"",autoPaid:false,isSplit:false,splitPeople:[]});
+const mf=()=>({type:"despesa",amt:"",desc:"",cat:"alimentacao",date:td(),note:"",atype:"bank",aid:"",freq:"none",bday:"ignore",inst:false,icount:"2",tamt:"",isTransfer:false,toAtype:"bank",toAid:"",autoPaid:false});
 
 const userDoc=uid=>doc(db,"users",uid);
 
@@ -56,7 +55,6 @@ export default function App(){
   const [ccat, setCcat]= useState({receita:[],despesa:[]});
   // invoices: { "cardId_YYYY_MM": { status:"open"|"closed"|"paid", paidDate, bankId, txIds } }
   const [invoices, setInvoices]= useState({});
-  const [splits,   setSplits]  = useState([]); // split expenses
 
   // ── UI ──
   const [view, setView]= useState("home");
@@ -82,8 +80,7 @@ export default function App(){
   const [invPayMdl,  setInvPayMdl] = useState(null);
   const [antecipMdl, setAntecipMdl]= useState(null); // {ins} for prepayment modal
   const [histFilter, setHistFilter]= useState({q:"",type:"all",cat:"",atype:""}); // extrato filters
-  const [txDetail,   setTxDetail]  = useState(null);
-  const [splitMdl,   setSplitMdl] = useState(null);  // split being viewed
+  const [txDetail,   setTxDetail]  = useState(null);  // transaction open in detail drawer
   const saveTimer      = useRef(null);
   const mainRef        = useRef(null);
   const userRef        = useRef(null); // always current user for use in event handlers
@@ -114,7 +111,6 @@ export default function App(){
           if(data.budg)     setBudg(data.budg);
           if(data.ccat)     setCcat(data.ccat);
           if(data.invoices) setInvoices(data.invoices);
-          if(data.splits)   setSplits(data.splits);
           if(data.pin)      setSavedPin(data.pin);
         }catch(e){console.error("Initial load:",e);}
         setDataLoaded(true);
@@ -137,14 +133,13 @@ export default function App(){
             if(data.budg)     setBudg(data.budg);
             if(data.ccat)     setCcat(data.ccat);
             if(data.invoices) setInvoices(data.invoices);
-            if(data.splits)   setSplits(data.splits);
             if(data.pin)      setSavedPin(data.pin);
           },
           err=>{console.error("Firestore sync:",err);}
         );
       } else {
         setTx([]);setRec([]);setInst([]);setBnks([]);setCrds([]);setBudg({});
-        setCcat({receita:[],despesa:[]});setInvoices({});setSplits([]);setSavedPin("");
+        setCcat({receita:[],despesa:[]});setInvoices({});setSavedPin("");
         setDataLoaded(false);setLocked(true);
       }
     });
@@ -174,7 +169,6 @@ export default function App(){
   const budgRef = useRef(budg);
   const ccatRef = useRef(ccat);
   const invRef  = useRef(invoices);
-  const splitsRef=useRef(splits);
   useEffect(()=>{txRef.current=tx;},[tx]);
   useEffect(()=>{recRef.current=rec;},[rec]);
   useEffect(()=>{instRef.current=inst;},[inst]);
@@ -183,7 +177,6 @@ export default function App(){
   useEffect(()=>{budgRef.current=budg;},[budg]);
   useEffect(()=>{ccatRef.current=ccat;},[ccat]);
   useEffect(()=>{invRef.current=invoices;},[invoices]);
-  useEffect(()=>{splitsRef.current=splits;},[splits]);
 
   // ── Debounced Firestore save com maxWait ──
   // Salva 800ms após a última mudança, mas garante save em no máximo 3s
@@ -204,7 +197,6 @@ export default function App(){
         budg:     budgRef.current,
         ccat:     ccatRef.current,
         invoices: invRef.current,
-        splits:   splitsRef.current,
       });
     };
     // Debounce: reinicia a cada mudança, salva 800ms após a última
@@ -230,7 +222,6 @@ export default function App(){
     if(overrides.budg)     budgRef.current=overrides.budg;
     if(overrides.ccat)     ccatRef.current=overrides.ccat;
     if(overrides.invoices) invRef.current=overrides.invoices;
-    if(overrides.splits)   splitsRef.current=overrides.splits;
     // Cancel pending debounce — refs are now up to date
     if(saveTimer.current){clearTimeout(saveTimer.current);saveTimer.current=null;}
     if(saveMaxTimer.current){clearTimeout(saveMaxTimer.current);saveMaxTimer.current=null;}
@@ -243,7 +234,6 @@ export default function App(){
       budg:     budgRef.current,
       ccat:     ccatRef.current,
       invoices: invRef.current,
-      splits:   splitsRef.current,
     });
   },[]);
 
@@ -594,16 +584,9 @@ export default function App(){
       saveNow({tx:newTx});
     } else {
       const isPaidNow=form.atype==="card"?false:!!form.autoPaid;
-      const tid=Date.now();
-      const newTx=[{id:tid,type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,paid:isPaidNow,isSplit:form.isSplit&&form.splitPeople.length>0},...txRef.current];
+      const newTx=[{id:Date.now(),type:form.type,amt:rawA,desc:form.desc,cat:form.cat,date:adjD,payDate,note:form.note||"",atype:form.atype,aid:parseInt(form.aid)||form.aid,paid:isPaidNow},...txRef.current];
       setTx(newTx);
-      // If split, create the split record
-      if(form.isSplit&&form.splitPeople.length>0){
-        addSplit(tid,form.desc,rawA,adjD,form.splitPeople);
-        toast$("Despesa + split criados ✓");
-      } else {
-        toast$(form.type==="receita"?"Receita adicionada ✓":"Despesa adicionada ✓");
-      }
+      toast$(form.type==="receita"?"Receita adicionada ✓":"Despesa adicionada ✓");
       setForm(mf());nav("home");
       saveNow({tx:newTx});
     }
@@ -833,37 +816,6 @@ export default function App(){
     saveNow({tx:newTx});
     toast$(`${fixed} transação${fixed!==1?"ões":""} corrigida${fixed!==1?"s":""} ✓`,"#34d399");
   };
-  // ── Split actions ──────────────────────────────────────────────────────────
-  const addSplit=(txId,desc,amt,date,people)=>{
-    const newSplit={id:Date.now(),txId,desc,amt,date,people:people.map((p,i)=>({...p,id:i+1,paid:false,paidDate:null}))};
-    const newSplits=[...splitsRef.current,newSplit];
-    setSplits(newSplits);
-    saveNow({splits:newSplits});
-  };
-
-  const markSplitPaid=(splitId,personId,bankId,payDate)=>{
-    const split=splitsRef.current.find(s=>s.id===splitId);
-    if(!split)return;
-    const person=split.people.find(p=>p.id===personId);
-    if(!person)return;
-    // Generate receipt tx
-    const bankName=bnksRef.current.find(b=>b.id===bankId)?.name||"conta";
-    const tid=Date.now();
-    const receipt={id:tid,type:"receita",amt:person.share,
-      desc:`💸 Reembolso: ${person.name} (${split.desc})`,
-      cat:"outros_r",date:payDate,note:"",
-      atype:"bank",aid:bankId,paid:true,isSplitReceipt:true,splitId};
-    const newTx=[receipt,...txRef.current];
-    // Mark person as paid
-    const newSplits=splitsRef.current.map(s=>s.id!==splitId?s:{
-      ...s,people:s.people.map(p=>p.id!==personId?p:{...p,paid:true,paidDate:payDate})
-    });
-    setTx(newTx);setSplits(newSplits);
-    toast$(`Reembolso de ${person.name} registrado ✓`);
-    setSplitMdl(prev=>prev?.id===splitId?newSplits.find(s=>s.id===splitId)||null:prev);
-    saveNow({tx:newTx,splits:newSplits});
-  };
-
   const Hd=({back,title})=>(
     <div style={{display:"flex",alignItems:"center",gap:11}}>
       <button onClick={back} style={{background:"#1e293b",border:"none",color:"#94a3b8",width:36,height:36,borderRadius:10,fontSize:18,flexShrink:0}}>←</button>
@@ -1194,19 +1146,6 @@ export default function App(){
         onTogglePaid={togglePaid}
       />}
 
-      {/* ── Split Modal ── */}
-      {splitMdl&&<SplitModal
-        split={splitMdl}
-        bnks={bnks}
-        bbal={bbal}
-        fmt={fmt}
-        td={td}
-        pd={pd}
-        MS={MS}
-        onClose={()=>setSplitMdl(null)}
-        onMarkPaid={(splitId,personId,bankId,payDate)=>markSplitPaid(splitId,personId,bankId,payDate)}
-      />}
-
       <div style={{padding:"calc(14px + env(safe-area-inset-top)) 18px 0",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0f172a",position:"sticky",top:0,zIndex:10}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
           {user?.photoURL&&<img src={user.photoURL} style={{width:28,height:28,borderRadius:"50%",flexShrink:0}} alt="" referrerPolicy="no-referrer"/>}
@@ -1303,55 +1242,6 @@ export default function App(){
             style={{background:"linear-gradient(135deg,#38bdf8,#818cf8)",color:"#fff",border:"none",borderRadius:13,padding:14,fontSize:15,fontWeight:700,width:"100%"}}>
             + Adicionar Lançamento
           </button>
-
-          {/* ── Splits panel ── only pending */}
-          {splits.filter(s=>s.people.some(p=>!p.paid)).length>0&&<div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.5}}>🤝 Splits Pendentes</p>
-              <span style={{background:"#451a03",color:"#f59e0b",borderRadius:99,padding:"2px 8px",fontSize:11,fontWeight:700}}>
-                {splits.filter(s=>s.people.some(p=>!p.paid)).length}
-              </span>
-            </div>
-            {splits.filter(s=>s.people.some(p=>!p.paid)).map(s=>{
-              const pending=s.people.filter(p=>!p.paid);
-              const totalPending=pending.reduce((sum,p)=>sum+p.share,0);
-              return(
-                <div key={s.id} onClick={()=>setSplitMdl(s)}
-                  style={{background:"#1e293b",border:"1px solid #334155",borderRadius:14,padding:"12px 14px",marginBottom:8,cursor:"pointer"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                    <div style={{flex:1,minWidth:0}}>
-                      <p style={{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.desc}</p>
-                      <p style={{fontSize:10,color:"#64748b",marginTop:2}}>{pd(s.date).toLocaleDateString("pt-BR")} · {pending.length} pessoa{pending.length!==1?"s":""} devendo</p>
-                    </div>
-                    <div style={{textAlign:"right",flexShrink:0,marginLeft:12}}>
-                      <p style={{fontSize:15,fontWeight:700,color:"#f59e0b",fontFamily:"'DM Mono',monospace"}}>{fmt(totalPending)}</p>
-                      <p style={{fontSize:9,color:"#64748b",marginTop:1}}>a receber</p>
-                    </div>
-                  </div>
-                  {/* People avatars */}
-                  <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
-                    {pending.map(p=>(
-                      <div key={p.id} style={{display:"flex",alignItems:"center",gap:5,background:"#0f172a",borderRadius:99,padding:"3px 10px 3px 4px"}}>
-                        <div style={{width:20,height:20,borderRadius:"50%",background:"#451a03",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#f59e0b",flexShrink:0}}>
-                          {p.name?p.name[0].toUpperCase():"?"}
-                        </div>
-                        <span style={{fontSize:11,color:"#e2e8f0"}}>{p.name||"?"}</span>
-                        <span style={{fontSize:11,color:"#f87171",fontFamily:"'DM Mono',monospace"}}>{fmt(p.share)}</span>
-                      </div>
-                    ))}
-                    {s.people.filter(p=>p.paid).map(p=>(
-                      <div key={p.id} style={{display:"flex",alignItems:"center",gap:5,background:"#0f172a",borderRadius:99,padding:"3px 10px 3px 4px",opacity:.5}}>
-                        <div style={{width:20,height:20,borderRadius:"50%",background:"#064e3b",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#34d399",flexShrink:0}}>
-                          ✓
-                        </div>
-                        <span style={{fontSize:11,color:"#64748b"}}>{p.name}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>}
 
           {Object.keys(catD).length>0&&<div className="card">
             <p style={{fontSize:10,fontWeight:700,color:"#94a3b8",marginBottom:11,textTransform:"uppercase",letterSpacing:.5}}>Por Categoria</p>
@@ -1645,84 +1535,6 @@ export default function App(){
             <div><p style={{fontSize:10,color:"#94a3b8",marginBottom:5,fontWeight:600}}>OBSERVAÇÃO (opcional)</p>
               <textarea className="fi" rows={2} placeholder="Alguma nota…" value={form.note} onChange={e=>setForm(f=>({...f,note:e.target.value}))} style={{resize:"none"}}/>
             </div>
-
-            {/* ── Split ── only for despesa, not installment/recurring */}
-            {form.type==="despesa"&&!form.inst&&form.freq==="none"&&!eid&&!recEid&&<div>
-              <div onClick={()=>setForm(f=>({...f,isSplit:!f.isSplit,splitPeople:f.isSplit?[]:[{name:"",email:"",share:""}]}))}
-                style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:12,padding:"11px 14px",cursor:"pointer"}}>
-                <div>
-                  <p style={{fontSize:13,fontWeight:600}}>🤝 Dividir conta (Split)</p>
-                  <p style={{fontSize:11,color:"#64748b",marginTop:2}}>Rachar o valor com outras pessoas</p>
-                </div>
-                <button className={`tog ${form.isSplit?"on":"off"}`} onClick={e=>{e.stopPropagation();setForm(f=>({...f,isSplit:!f.isSplit,splitPeople:f.isSplit?[]:[{name:"",email:"",share:""}]}))}}/>
-              </div>
-
-              {form.isSplit&&<div style={{background:"#0f172a",borderRadius:12,padding:14,marginTop:8}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                  <p style={{fontSize:11,fontWeight:700,color:"#94a3b8"}}>PESSOAS</p>
-                  <button onClick={()=>{
-                    const total=parseFloat(String(form.amt).replace(",","."))||0;
-                    const newPeople=[...form.splitPeople,{name:"",email:"",share:""}];
-                    // Recalculate equal shares
-                    const equalShare=total>0?+(total/newPeople.length).toFixed(2):0;
-                    setForm(f=>({...f,splitPeople:newPeople.map(p=>({...p,share:equalShare>0?String(equalShare):p.share}))}));
-                  }} style={{background:"#1e3a5f",border:"none",borderRadius:8,padding:"5px 12px",color:"#38bdf8",fontSize:12,fontWeight:600}}>
-                    + Pessoa
-                  </button>
-                </div>
-
-                {form.splitPeople.map((p,i)=>{
-                  const total=parseFloat(String(form.amt).replace(",","."))||0;
-                  const sumOthers=form.splitPeople.reduce((s,pp,ii)=>ii!==i?s+(parseFloat(String(pp.share).replace(",","."))||0):s,0);
-                  const remaining=total-sumOthers;
-                  return(
-                  <div key={i} style={{background:"#1e293b",borderRadius:10,padding:"10px 12px",marginBottom:8}}>
-                    <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
-                      <div style={{width:30,height:30,borderRadius:"50%",background:"#334155",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0,color:"#94a3b8",fontWeight:700}}>
-                        {p.name?p.name[0].toUpperCase():`${i+1}`}
-                      </div>
-                      <input className="fi" placeholder="Nome" value={p.name}
-                        onChange={e=>{const pp=[...form.splitPeople];pp[i]={...pp[i],name:e.target.value};setForm(f=>({...f,splitPeople:pp}));}}
-                        style={{flex:1,fontSize:14,padding:"8px 12px"}}/>
-                      <button onClick={()=>{
-                        const pp=form.splitPeople.filter((_,ii)=>ii!==i);
-                        const total2=parseFloat(String(form.amt).replace(",","."))||0;
-                        const eq=pp.length>0&&total2>0?+(total2/pp.length).toFixed(2):0;
-                        setForm(f=>({...f,splitPeople:pp.map(p2=>({...p2,share:eq>0?String(eq):p2.share}))}));
-                      }} style={{background:"#450a0a",border:"none",borderRadius:8,width:28,height:28,color:"#f87171",fontSize:16,flexShrink:0}}>×</button>
-                    </div>
-                    <div style={{display:"flex",gap:8}}>
-                      <input className="fi" placeholder="Email (opcional)" value={p.email}
-                        onChange={e=>{const pp=[...form.splitPeople];pp[i]={...pp[i],email:e.target.value};setForm(f=>({...f,splitPeople:pp}));}}
-                        style={{flex:2,fontSize:13,padding:"8px 12px"}}/>
-                      <div style={{flex:1,position:"relative"}}>
-                        <input className="fi" type="number" inputMode="decimal" placeholder="Valor"
-                          value={p.share}
-                          onChange={e=>{const pp=[...form.splitPeople];pp[i]={...pp[i],share:e.target.value};setForm(f=>({...f,splitPeople:pp}));}}
-                          style={{fontSize:13,padding:"8px 12px",width:"100%"}}/>
-                      </div>
-                    </div>
-                    {remaining>0&&!p.share&&<button onClick={()=>{const pp=[...form.splitPeople];pp[i]={...pp[i],share:String(+remaining.toFixed(2))};setForm(f=>({...f,splitPeople:pp}));}}
-                      style={{background:"none",border:"none",color:"#38bdf8",fontSize:10,marginTop:4,padding:0}}>
-                      ← usar restante {fmt(remaining)}
-                    </button>}
-                  </div>
-                );})}
-
-                {/* Summary */}
-                {form.splitPeople.length>0&&(()=>{
-                  const total=parseFloat(String(form.amt).replace(",","."))||0;
-                  const assigned=form.splitPeople.reduce((s,p)=>s+(parseFloat(String(p.share).replace(",","."))||0),0);
-                  const diff=total-assigned;
-                  return<div style={{display:"flex",justifyContent:"space-between",padding:"8px 4px",borderTop:"1px solid #1e293b",marginTop:4}}>
-                    <span style={{fontSize:11,color:"#64748b"}}>Total dividido</span>
-                    <span style={{fontSize:12,fontWeight:700,color:Math.abs(diff)<0.01?"#34d399":"#f59e0b"}}>
-                      {fmt(assigned)} {Math.abs(diff)>0.01&&<span style={{fontSize:10}}>({diff>0?"-":"+"}faltam {fmt(Math.abs(diff))})</span>}
-                    </span>
-                  </div>;
-                })()}
-              </div>}
-            </div>}
 
             {/* Installment preview */}
             {form.inst&&instPreview.length>0&&<div className="card" style={{borderLeft:"3px solid #818cf8"}}>
