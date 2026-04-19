@@ -332,47 +332,48 @@ export default function App(){
     const isFutureMonth=(new Date(y,m,1))>new Date(NOW.getFullYear(),NOW.getMonth(),1);
     for(const tpl of rec){if(!tpl.freq||tpl.freq==="none")continue;
       if(tpl.atype==="bank"&&hiddenBankIds.has(tpl.aid))continue;
+      const tplCard=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
       for(const o of recInMonth(tpl,m,y)){
-        const d=pd(o.date);
-        // Current month: only show items not yet happened today
-        // Future months: show everything
-        if(!isFutureMonth&&d<=NOW)continue;
+        const card=tplCard;
+        const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
+        // For card recurring: filter by payDate (billing month), not purchase date
+        const billingDate=payDate?pd(payDate):pd(o.date);
+        if(billingDate.getMonth()!==m||billingDate.getFullYear()!==y)continue;
+        if(!isFutureMonth&&billingDate<=NOW)continue;
         if(!tx.find(t=>t.rk===`${tpl.id}__${o.orig}`)){
-          const card=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
-          const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
           items.push({_fid:`fr_${tpl.id}_${o.orig}`,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:o.date,payDate,atype:tpl.atype,aid:tpl.aid,isRF:true,rid:tpl.id,orig:o.orig});
         }
       }
     }
     for(const ins of inst){
       if(ins.atype==="bank"&&hiddenBankIds.has(ins.aid))continue;
-      for(const o of instInMonth(ins,m,y)){
-        const d=pd(o.date);
-        if(!isFutureMonth&&d<=NOW)continue;
-        const iid=`i_${ins.id}_${o.idx}`;
-        // Skip if materialised by standard id OR by antecipação (any tx with matching iid+iidx)
-        const alreadyMat=tx.find(t=>t.id===iid)||tx.some(t=>t.iid===ins.id&&t.iidx===o.idx);
-        if(!alreadyMat){
-          const card=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
-          const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
-          items.push({_fid:`fi_${ins.id}_${o.idx}`,type:ins.type,amt:o.amt,desc:ins.desc,cat:ins.cat,date:o.date,payDate,atype:ins.atype,aid:ins.aid,isIF:true,iidx:o.idx,icount:ins.icount,tamt:ins.tamt});
-        }
+      const insCard=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
+      // Iterate over ALL installments (not just those in purchase-month m/y)
+      // because for card purchases we need to filter by payDate (billing month), not purchase date
+      for(let idx=1;idx<=ins.icount;idx++){
+        const d=pd(ins.startDate);d.setMonth(d.getMonth()+(idx-1));
+        const purchaseDate=d.toISOString().split("T")[0];
+        const payDate=insCard?cardPayDate(purchaseDate,insCard.closing,insCard.due):purchaseDate;
+        // Filter by the month this installment actually BILLS in (payDate for card, purchaseDate for bank)
+        const billingDate=pd(payDate);
+        if(billingDate.getMonth()!==m||billingDate.getFullYear()!==y)continue;
+        if(!isFutureMonth&&billingDate<=NOW)continue;
+        // Bug 1 fix: skip if already materialised by ANY means (standard id OR antecipação)
+        const alreadyMat=tx.some(t=>t.iid===ins.id&&t.iidx===idx);
+        if(alreadyMat)continue;
+        items.push({_fid:`fi_${ins.id}_${idx}`,type:ins.type,amt:ins.tamt/ins.icount,desc:ins.desc,cat:ins.cat,date:purchaseDate,payDate,atype:ins.atype,aid:ins.aid,isIF:true,iidx:idx,icount:ins.icount,tamt:ins.tamt});
       }
     }
     return items.sort((a,b)=>pd(a.date)-pd(b.date));
   },[rec,inst,tx,m,y,NOW,crds,hiddenBankIds]);
 
-  // Deduplicates fcasts against confM — prevents double-listing when a forecast
-  // is already materialised in the current month (e.g. after antecipação)
+  // Deduplicates fcasts against confM — prevents double-listing
   const allM=useMemo(()=>{
     const confMRks=new Set(confM.filter(t=>t.rk).map(t=>t.rk));
     const confMInstKeys=new Set(confM.filter(t=>t.iid&&t.iidx).map(t=>`${t.iid}_${t.iidx}`));
     const dedupedFcasts=fcasts.filter(f=>{
       if(f.isRF&&f.rid&&f.orig)return!confMRks.has(`${f.rid}__${f.orig}`);
-      if(f.isIF){
-        const parts=f._fid?.split("_");
-        if(parts&&parts.length>=3)return!confMInstKeys.has(`${parts[1]}_${f.iidx}`);
-      }
+      if(f.isIF)return!confMInstKeys.has(`${f._fid.split("_")[1]}_${f.iidx}`);
       return true;
     });
     return[...confM.map(t=>({...t,real:true})),...dedupedFcasts].sort((a,b)=>pd(b.date)-pd(a.date));
