@@ -350,7 +350,9 @@ export default function App(){
         const d=pd(o.date);
         if(!isFutureMonth&&d<=NOW)continue;
         const iid=`i_${ins.id}_${o.idx}`;
-        if(!tx.find(t=>t.id===iid)){
+        // Skip if materialised by standard id OR by antecipação (any tx with matching iid+iidx)
+        const alreadyMat=tx.find(t=>t.id===iid)||tx.some(t=>t.iid===ins.id&&t.iidx===o.idx);
+        if(!alreadyMat){
           const card=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
           const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
           items.push({_fid:`fi_${ins.id}_${o.idx}`,type:ins.type,amt:o.amt,desc:ins.desc,cat:ins.cat,date:o.date,payDate,atype:ins.atype,aid:ins.aid,isIF:true,iidx:o.idx,icount:ins.icount,tamt:ins.tamt});
@@ -360,9 +362,21 @@ export default function App(){
     return items.sort((a,b)=>pd(a.date)-pd(b.date));
   },[rec,inst,tx,m,y,NOW,crds,hiddenBankIds]);
 
-  const allM=useMemo(()=>[...confM.map(t=>({...t,real:true})),...fcasts].sort((a,b)=>
-    pd(b.date)-pd(a.date)
-  ),[confM,fcasts]);
+  // Deduplicates fcasts against confM — prevents double-listing when a forecast
+  // is already materialised in the current month (e.g. after antecipação)
+  const allM=useMemo(()=>{
+    const confMRks=new Set(confM.filter(t=>t.rk).map(t=>t.rk));
+    const confMInstKeys=new Set(confM.filter(t=>t.iid&&t.iidx).map(t=>`${t.iid}_${t.iidx}`));
+    const dedupedFcasts=fcasts.filter(f=>{
+      if(f.isRF&&f.rid&&f.orig)return!confMRks.has(`${f.rid}__${f.orig}`);
+      if(f.isIF){
+        const parts=f._fid?.split("_");
+        if(parts&&parts.length>=3)return!confMInstKeys.has(`${parts[1]}_${f.iidx}`);
+      }
+      return true;
+    });
+    return[...confM.map(t=>({...t,real:true})),...dedupedFcasts].sort((a,b)=>pd(b.date)-pd(a.date));
+  },[confM,fcasts]);
 
   // Filtered list for extrato view
   const allMFiltered=useMemo(()=>{
