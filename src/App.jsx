@@ -330,50 +330,67 @@ export default function App(){
   const fcasts=useMemo(()=>{
     const items=[];
     const isFutureMonth=(new Date(y,m,1))>new Date(NOW.getFullYear(),NOW.getMonth(),1);
-    for(const tpl of rec){if(!tpl.freq||tpl.freq==="none")continue;
+
+    // ── Recurring transactions ──
+    // For bank: filter by purchase month (date falls in m/y)
+    // For card: purchases in the PREVIOUS month can bill in m/y (closing day logic),
+    //           so we scan prev month + current month and keep only those whose payDate is in m/y
+    for(const tpl of rec){
+      if(!tpl.freq||tpl.freq==="none")continue;
       if(tpl.atype==="bank"&&hiddenBankIds.has(tpl.aid))continue;
       const tplCard=tpl.atype==="card"?crds.find(c=>c.id==tpl.aid):null;
-      for(const o of recInMonth(tpl,m,y)){
-        const card=tplCard;
-        const payDate=card?cardPayDate(o.date,card.closing,card.due):undefined;
-        // For card recurring: filter by payDate (billing month), not purchase date
-        const billingDate=payDate?pd(payDate):pd(o.date);
-        if(billingDate.getMonth()!==m||billingDate.getFullYear()!==y)continue;
-        if(!isFutureMonth&&billingDate<=NOW)continue;
-        if(!tx.find(t=>t.rk===`${tpl.id}__${o.orig}`)){
-          items.push({_fid:`fr_${tpl.id}_${o.orig}`,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:o.date,payDate,atype:tpl.atype,aid:tpl.aid,isRF:true,rid:tpl.id,orig:o.orig});
+      // Scan two months: prev + current (covers purchases that cross the closing boundary)
+      const scanMonths=tplCard?[[m===0?11:m-1,m===0?y-1:y],[m,y]]:[[m,y]];
+      const seen=new Set();
+      for(const [sm,sy] of scanMonths){
+        for(const o of recInMonth(tpl,sm,sy)){
+          if(seen.has(o.orig))continue;
+          const payDate=tplCard?cardPayDate(o.date,tplCard.closing,tplCard.due):undefined;
+          // For card: only include if payDate falls in the filtered month
+          if(tplCard){
+            const bd=pd(payDate);
+            if(bd.getMonth()!==m||bd.getFullYear()!==y)continue;
+          }
+          const billingDate=payDate?pd(payDate):pd(o.date);
+          if(!isFutureMonth&&billingDate<=NOW)continue;
+          if(!tx.find(t=>t.rk===`${tpl.id}__${o.orig}`)){
+            seen.add(o.orig);
+            items.push({_fid:`fr_${tpl.id}_${o.orig}`,type:tpl.type,amt:tpl.amt,desc:tpl.desc,cat:tpl.cat,date:o.date,payDate,atype:tpl.atype,aid:tpl.aid,isRF:true,rid:tpl.id,orig:o.orig});
+          }
         }
       }
     }
+
+    // ── Installments ──
+    // Same logic: filter by payDate (billing month) not purchase date.
+    // Also skip any installment already paid (including via antecipação).
     for(const ins of inst){
       if(ins.atype==="bank"&&hiddenBankIds.has(ins.aid))continue;
       const insCard=ins.atype==="card"?crds.find(c=>c.id==ins.aid):null;
-      // Iterate over ALL installments (not just those in purchase-month m/y)
-      // because for card purchases we need to filter by payDate (billing month), not purchase date
       for(let idx=1;idx<=ins.icount;idx++){
+        // Skip if already materialised by any means (normal OR antecipação)
+        if(tx.some(t=>t.iid===ins.id&&t.iidx===idx))continue;
         const d=pd(ins.startDate);d.setMonth(d.getMonth()+(idx-1));
         const purchaseDate=d.toISOString().split("T")[0];
         const payDate=insCard?cardPayDate(purchaseDate,insCard.closing,insCard.due):purchaseDate;
-        // Filter by the month this installment actually BILLS in (payDate for card, purchaseDate for bank)
         const billingDate=pd(payDate);
+        // Filter by billing month
         if(billingDate.getMonth()!==m||billingDate.getFullYear()!==y)continue;
         if(!isFutureMonth&&billingDate<=NOW)continue;
-        // Bug 1 fix: skip if already materialised by ANY means (standard id OR antecipação)
-        const alreadyMat=tx.some(t=>t.iid===ins.id&&t.iidx===idx);
-        if(alreadyMat)continue;
         items.push({_fid:`fi_${ins.id}_${idx}`,type:ins.type,amt:ins.tamt/ins.icount,desc:ins.desc,cat:ins.cat,date:purchaseDate,payDate,atype:ins.atype,aid:ins.aid,isIF:true,iidx:idx,icount:ins.icount,tamt:ins.tamt});
       }
     }
+
     return items.sort((a,b)=>pd(a.date)-pd(b.date));
   },[rec,inst,tx,m,y,NOW,crds,hiddenBankIds]);
 
-  // Deduplicates fcasts against confM — prevents double-listing
+  // Deduplicates fcasts against already-materialised confM entries
   const allM=useMemo(()=>{
     const confMRks=new Set(confM.filter(t=>t.rk).map(t=>t.rk));
     const confMInstKeys=new Set(confM.filter(t=>t.iid&&t.iidx).map(t=>`${t.iid}_${t.iidx}`));
     const dedupedFcasts=fcasts.filter(f=>{
       if(f.isRF&&f.rid&&f.orig)return!confMRks.has(`${f.rid}__${f.orig}`);
-      if(f.isIF)return!confMInstKeys.has(`${f._fid.split("_")[1]}_${f.iidx}`);
+      if(f.isIF)return!confMInstKeys.has(`${f.iid||f._fid.split("_")[1]}_${f.iidx}`);
       return true;
     });
     return[...confM.map(t=>({...t,real:true})),...dedupedFcasts].sort((a,b)=>pd(b.date)-pd(a.date));
